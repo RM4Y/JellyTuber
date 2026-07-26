@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using MediaBrowser.Model.Plugins;
 
-namespace Jellyfin.Plugin.YouTubeFast.Configuration;
+namespace Jellyfin.Plugin.JellyTuber.Configuration;
 
 /// <summary>
 /// A single channel or playlist the user wants to sync.
@@ -79,13 +79,6 @@ public class PluginConfiguration : BasePluginConfiguration
     /// </summary>
     public int LinkCacheMinutes { get; set; } = 300;
 
-    /// <summary>
-    /// Speeds up cold playback start: skips downloading the full YouTube watch
-    /// page during resolution (relies on the lighter innertube API). Disable if
-    /// some videos fail to start.
-    /// </summary>
-    public bool FastResolve { get; set; } = true;
-
     /// <summary>Fetch per-video details (duration etc.). Costs a little extra quota.</summary>
     public bool FetchVideoDetails { get; set; } = true;
 
@@ -109,13 +102,11 @@ public class PluginConfiguration : BasePluginConfiguration
     public string YtDlpFormatOverride { get; set; } = string.Empty;
 
     /// <summary>
-    /// Extra yt-dlp arguments (advanced), space-separated. Defaults wire up the
-    /// Deno JS runtime (needed for YouTube's n-challenge, so 1080p+ formats
-    /// resolve) and Jellyfin's bundled ffmpeg. Adjust the deno path if yours
-    /// differs.
+    /// Extra yt-dlp arguments (advanced), space-separated. Default wires up
+    /// the Deno JS runtime, needed for YouTube's n-challenge so 1080p+
+    /// formats resolve at all. Adjust the deno path if yours differs.
     /// </summary>
-    public string YtDlpExtraArgs { get; set; } =
-        "--js-runtimes deno:/usr/bin/deno --ffmpeg-location /usr/lib/jellyfin-ffmpeg/ffmpeg";
+    public string YtDlpExtraArgs { get; set; } = "--js-runtimes deno:/usr/bin/deno";
 
     /// <summary>The channels / playlists to sync.</summary>
     public List<SourceItem> Sources { get; set; } = new();

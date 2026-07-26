@@ -1,7 +1,7 @@
 {
   "category": "Channels",
   "guid": "b9f8e1a2-3c4d-4e5f-8a7b-1c2d3e4f5a6b",
-  "name": "YouTube Fast",
+  "name": "JellyTuber",
   "description": "Index YouTube channels and playlists via the YouTube Data API, stream on demand with yt-dlp.",
   "overview": "Fast YouTube indexing using the official Data API instead of scraping.",
   "owner": "you",

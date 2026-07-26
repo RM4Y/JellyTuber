@@ -1,4 +1,4 @@
-namespace Jellyfin.Plugin.YouTubeFast.Api;
+namespace Jellyfin.Plugin.JellyTuber.Api;
 
 /// <summary>Static HTML for the self-service management page (Space Grotesk theme).</summary>
 internal static class PageHtml
@@ -9,21 +9,21 @@ internal static class PageHtml
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>YouTubeFast</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%2322c3b6'/><stop offset='1' stop-color='%232a9fd6'/></linearGradient></defs><rect width='24' height='24' rx='6' fill='url(%23g)'/><g fill='%23ffffff'><polygon points='4,6 11,12 4,18'/><polygon points='12,6 19,12 12,18'/></g></svg>" />
+<title>JellyTuber</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 280 280'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%238927be'/><stop offset='1' stop-color='%23a793f4'/></linearGradient></defs><rect width='280' height='280' rx='64' fill='url(%23g)'/><g transform='rotate(-16 140 145) translate(140 145) scale(1.25) translate(-140 -145)'><g stroke='%23ffffff' stroke-width='9' stroke-linecap='round' fill='none'><path d='M140.0,106.0 C137.3,106.7 129.3,108.4 124.0,110.1 C118.7,111.7 113.3,115.2 108.0,115.8 C102.7,116.4 97.3,115.4 92.0,113.8 C86.7,112.1 78.7,107.3 76.0,106.0'/><path d='M140.0,134.0 C138.0,134.8 132.0,137.7 128.0,139.0 C124.0,140.2 120.0,142.1 116.0,141.7 C112.0,141.2 108.0,138.2 104.0,136.5 C100.0,134.7 96.0,131.8 92.0,131.3 C88.0,130.9 82.0,133.6 80.0,134.0'/><path d='M140.0,158.0 C138.0,158.3 132.0,158.6 128.0,159.9 C124.0,161.2 120.0,164.5 116.0,165.8 C112.0,167.0 108.0,168.0 104.0,167.5 C100.0,167.0 96.0,164.3 92.0,162.7 C88.0,161.1 82.0,158.8 80.0,158.0'/><path d='M140.0,186.0 C137.3,186.8 129.3,189.2 124.0,190.8 C118.7,192.5 113.3,195.5 108.0,196.0 C102.7,196.5 97.3,195.4 92.0,193.8 C86.7,192.1 78.7,187.3 76.0,186.0'/></g><path d='M 140 90 L 210 145 L 140 200 Z' fill='%23ffffff' stroke='%23ffffff' stroke-width='22' stroke-linejoin='round'/></g></svg>" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg:#0c1116; --bg-elev:#141b22; --bg-elev2:#1b242d; --border:#243039;
-    --text:#e9eff2; --text-dim:#8aa0ab; --accent:#22c3b6; --accent-2:#2a9fd6;
-    --on-accent:#042522; --glow:rgba(34,195,182,0.25); --card-shadow:0 8px 30px rgba(0,0,0,0.35);
+    --text:#e9eff2; --text-dim:#8aa0ab; --accent:#9b4fd3; --accent-2:#a793f4;
+    --on-accent:#ffffff; --glow:rgba(155,79,211,0.28); --card-shadow:0 8px 30px rgba(0,0,0,0.35);
   }
   :root.light {
     --bg:#eef3f4; --bg-elev:#ffffff; --bg-elev2:#f2f7f8; --border:#dbe5e8;
-    --text:#13232a; --text-dim:#5b7079; --accent:#0d9488; --accent-2:#1593b8;
-    --on-accent:#ffffff; --glow:rgba(13,148,136,0.16); --card-shadow:0 8px 30px rgba(20,50,60,0.10);
+    --text:#13232a; --text-dim:#5b7079; --accent:#861cb4; --accent-2:#8c63dd;
+    --on-accent:#ffffff; --glow:rgba(134,28,180,0.16); --card-shadow:0 8px 30px rgba(20,50,60,0.10);
   }
   * { box-sizing: border-box; }
   html, body { margin:0; padding:0; }
@@ -129,10 +129,20 @@ internal static class PageHtml
   <div id="login" style="min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:40px 20px;">
     <div style="display:flex; align-items:center; gap:13px; margin-bottom:34px;">
       <div class="logo" style="width:46px; height:46px;">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="#fff"><polygon points="2,4.5 11,12 2,19.5"/><polygon points="12,4.5 21,12 12,19.5"/></svg>
+        <svg width="36" height="36" viewBox="0 0 280 280" style="overflow:visible;">
+          <g transform="rotate(-16 140 145) translate(140 145) scale(1.25) translate(-140 -145)">
+            <g stroke="#fff" stroke-width="9" stroke-linecap="round" fill="none">
+              <path d="M140.0,106.0 C137.3,106.7 129.3,108.4 124.0,110.1 C118.7,111.7 113.3,115.2 108.0,115.8 C102.7,116.4 97.3,115.4 92.0,113.8 C86.7,112.1 78.7,107.3 76.0,106.0"></path>
+              <path d="M140.0,134.0 C138.0,134.8 132.0,137.7 128.0,139.0 C124.0,140.2 120.0,142.1 116.0,141.7 C112.0,141.2 108.0,138.2 104.0,136.5 C100.0,134.7 96.0,131.8 92.0,131.3 C88.0,130.9 82.0,133.6 80.0,134.0"></path>
+              <path d="M140.0,158.0 C138.0,158.3 132.0,158.6 128.0,159.9 C124.0,161.2 120.0,164.5 116.0,165.8 C112.0,167.0 108.0,168.0 104.0,167.5 C100.0,167.0 96.0,164.3 92.0,162.7 C88.0,161.1 82.0,158.8 80.0,158.0"></path>
+              <path d="M140.0,186.0 C137.3,186.8 129.3,189.2 124.0,190.8 C118.7,192.5 113.3,195.5 108.0,196.0 C102.7,196.5 97.3,195.4 92.0,193.8 C86.7,192.1 78.7,187.3 76.0,186.0"></path>
+            </g>
+            <path d="M 140 90 L 210 145 L 140 200 Z" fill="#fff" stroke="#fff" stroke-width="22" stroke-linejoin="round"></path>
+          </g>
+        </svg>
       </div>
       <div style="display:flex; flex-direction:column; line-height:1.05;">
-        <span class="brandName" style="font-size:19px;">YOUTUBE <b>FAST</b></span>
+        <span class="brandName" style="font-size:19px;">JELLY <b>TUBER</b></span>
         <span style="font-size:10.5px; font-weight:500; letter-spacing:2.5px; color:var(--text-dim);">PLUGIN JELLYFIN</span>
       </div>
     </div>
@@ -157,9 +167,19 @@ internal static class PageHtml
   <div id="app" class="hidden" style="max-width:760px; margin:0 auto; padding:30px 22px 70px;">
     <div style="display:flex; align-items:center; gap:11px; margin-bottom:26px;">
       <div class="logo" style="width:34px; height:34px; border-radius:10px;">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><polygon points="2,4.5 11,12 2,19.5"/><polygon points="12,4.5 21,12 12,19.5"/></svg>
+        <svg width="26" height="26" viewBox="0 0 280 280" style="overflow:visible;">
+          <g transform="rotate(-16 140 145) translate(140 145) scale(1.25) translate(-140 -145)">
+            <g stroke="#fff" stroke-width="9" stroke-linecap="round" fill="none">
+              <path d="M140.0,106.0 C137.3,106.7 129.3,108.4 124.0,110.1 C118.7,111.7 113.3,115.2 108.0,115.8 C102.7,116.4 97.3,115.4 92.0,113.8 C86.7,112.1 78.7,107.3 76.0,106.0"></path>
+              <path d="M140.0,134.0 C138.0,134.8 132.0,137.7 128.0,139.0 C124.0,140.2 120.0,142.1 116.0,141.7 C112.0,141.2 108.0,138.2 104.0,136.5 C100.0,134.7 96.0,131.8 92.0,131.3 C88.0,130.9 82.0,133.6 80.0,134.0"></path>
+              <path d="M140.0,158.0 C138.0,158.3 132.0,158.6 128.0,159.9 C124.0,161.2 120.0,164.5 116.0,165.8 C112.0,167.0 108.0,168.0 104.0,167.5 C100.0,167.0 96.0,164.3 92.0,162.7 C88.0,161.1 82.0,158.8 80.0,158.0"></path>
+              <path d="M140.0,186.0 C137.3,186.8 129.3,189.2 124.0,190.8 C118.7,192.5 113.3,195.5 108.0,196.0 C102.7,196.5 97.3,195.4 92.0,193.8 C86.7,192.1 78.7,187.3 76.0,186.0"></path>
+            </g>
+            <path d="M 140 90 L 210 145 L 140 200 Z" fill="#fff" stroke="#fff" stroke-width="22" stroke-linejoin="round"></path>
+          </g>
+        </svg>
       </div>
-      <span class="brandName" style="font-size:14px;">YOUTUBE <b>FAST</b></span>
+      <span class="brandName" style="font-size:14px;">JELLY <b>TUBER</b></span>
     </div>
 
     <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:24px;">
@@ -296,7 +316,7 @@ internal static class PageHtml
     fetch("/Users/AuthenticateByName", {
       method: "POST",
       headers: { "Content-Type": "application/json",
-        "Authorization": 'MediaBrowser Client="YouTube Fast", Device="Web", DeviceId="ytf-manager", Version="1.0.0"' },
+        "Authorization": 'MediaBrowser Client="JellyTuber", Device="Web", DeviceId="jellytuber-manager", Version="1.0.0"' },
       body: JSON.stringify({ Username: u, Pw: p })
     }).then(function (r){ if(!r.ok) throw new Error("auth"); return r.json(); })
       .then(function (d) {
@@ -321,7 +341,7 @@ internal static class PageHtml
   function field(o, k) { return o[k] != null ? o[k] : o[k.charAt(0).toLowerCase() + k.slice(1)]; }
 
   function loadMine() {
-    api("/YouTubeFast/User/Channels?userId=" + encodeURIComponent(userId)).then(function (list) {
+    api("/JellyTuber/User/Channels?userId=" + encodeURIComponent(userId)).then(function (list) {
       var box = document.getElementById("mine"); box.innerHTML = "";
       var n = list.length;
       document.getElementById("count").textContent = n + (n > 1 ? " chaînes" : " chaîne");
@@ -339,13 +359,13 @@ internal static class PageHtml
         sh.innerHTML = '<span class="dot"></span>Exclure les Shorts';
         sh.addEventListener("click", function () {
           ex = !ex; sh.className = "shorts" + (ex ? " on" : "");
-          api("/YouTubeFast/User/ToggleShorts", { method: "POST", body: JSON.stringify({ userId: userId, channelId: cid, excludeShorts: ex }) });
+          api("/JellyTuber/User/ToggleShorts", { method: "POST", body: JSON.stringify({ userId: userId, channelId: cid, excludeShorts: ex }) });
         });
         card.appendChild(sh);
 
         var rm = document.createElement("button"); rm.className = "remove"; rm.textContent = "Retirer";
         rm.addEventListener("click", function () {
-          api("/YouTubeFast/User/Remove", { method: "POST", body: JSON.stringify({ userId: userId, channelId: cid }) }).then(loadMine);
+          api("/JellyTuber/User/Remove", { method: "POST", body: JSON.stringify({ userId: userId, channelId: cid }) }).then(loadMine);
         });
         card.appendChild(rm);
         box.appendChild(card);
@@ -357,7 +377,7 @@ internal static class PageHtml
     var q = document.getElementById("q").value.trim(); if (q.length < 2) return;
     var box = document.getElementById("results");
     box.innerHTML = '<p style="color:var(--text-dim); font-size:14px;">Recherche…</p>';
-    api("/YouTubeFast/User/Search", { method: "POST", body: JSON.stringify({ query: q }) }).then(function (list) {
+    api("/JellyTuber/User/Search", { method: "POST", body: JSON.stringify({ query: q }) }).then(function (list) {
       box.innerHTML = "";
       if (!list.length) { box.innerHTML = '<p style="color:var(--text-dim); font-size:14px;">Aucune chaîne trouvée.</p>'; return; }
       list.forEach(function (c, i) {
@@ -370,7 +390,7 @@ internal static class PageHtml
         row.appendChild(nm);
         var add = document.createElement("button"); add.className = "btn-accent"; add.style.cssText = "padding:8px 16px; font-size:13px;"; add.textContent = "Ajouter";
         add.addEventListener("click", function () {
-          api("/YouTubeFast/User/Add", { method: "POST", body: JSON.stringify({ userId: userId, userName: userName, channelId: cid, name: name, thumbnail: thumb }) })
+          api("/JellyTuber/User/Add", { method: "POST", body: JSON.stringify({ userId: userId, userName: userName, channelId: cid, name: name, thumbnail: thumb }) })
             .then(function () { row.remove(); loadMine(); });
         });
         row.appendChild(add);
@@ -388,7 +408,7 @@ internal static class PageHtml
   }
 
   function loadVideos() {
-    api("/YouTubeFast/User/Videos?userId=" + encodeURIComponent(userId)).then(function (list) {
+    api("/JellyTuber/User/Videos?userId=" + encodeURIComponent(userId)).then(function (list) {
       var box = document.getElementById("videos"); box.innerHTML = "";
       var n = list.length;
       document.getElementById("vcount").textContent = n + (n > 1 ? " vidéos" : " vidéo");
@@ -403,7 +423,7 @@ internal static class PageHtml
 
         var rm = document.createElement("button"); rm.className = "remove"; rm.textContent = "Retirer";
         rm.addEventListener("click", function () {
-          api("/YouTubeFast/User/RemoveVideo", { method: "POST", body: JSON.stringify({ userId: userId, videoId: vid }) }).then(loadVideos);
+          api("/JellyTuber/User/RemoveVideo", { method: "POST", body: JSON.stringify({ userId: userId, videoId: vid }) }).then(loadVideos);
         });
         card.appendChild(rm);
         box.appendChild(card);
@@ -416,7 +436,7 @@ internal static class PageHtml
     var msg = document.getElementById("vmsg");
     if (!url) return;
     msg.style.color = "var(--text-dim)"; msg.textContent = "Ajout…";
-    api("/YouTubeFast/User/AddVideo", { method: "POST", body: JSON.stringify({ userId: userId, userName: userName, url: url }) })
+    api("/JellyTuber/User/AddVideo", { method: "POST", body: JSON.stringify({ userId: userId, userName: userName, url: url }) })
       .then(function (r) {
         var status = r && field(r, "Status");
         if (status === "exists") {
@@ -444,7 +464,7 @@ internal static class PageHtml
 
   function doSync() {
     var icon = document.getElementById("syncIcon"); icon.classList.add("spin");
-    api("/YouTubeFast/User/Sync", { method: "POST" }).then(function () {
+    api("/JellyTuber/User/Sync", { method: "POST" }).then(function () {
       var d = new Date();
       var t = String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
       document.getElementById("syncStatus").textContent = "Dernière synchro à " + t;

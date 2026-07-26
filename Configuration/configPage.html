@@ -2,19 +2,19 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <title>YouTube Fast</title>
+    <title>JellyTuber</title>
 </head>
 <body>
-<div id="YouTubeFastConfigPage"
+<div id="JellyTuberConfigPage"
      data-role="page"
      class="page type-interior pluginConfigurationPage"
      data-require="emby-input,emby-button,emby-select,emby-checkbox">
     <div data-role="content">
         <div class="content-primary">
-            <form id="YouTubeFastConfigForm">
+            <form id="JellyTuberConfigForm">
 
                 <div class="sectionTitleContainer flex align-items-center">
-                    <h2>YouTube Fast</h2>
+                    <h2>JellyTuber</h2>
                 </div>
                 <p class="fieldDescription">
                     Fast indexing via the YouTube Data API v3. Playback is resolved on demand with yt-dlp;
@@ -62,15 +62,7 @@
                         <option value="1440">1440p</option>
                         <option value="2160">2160p (4K)</option>
                     </select>
-                    <div class="fieldDescription">Jellyfin then transcodes with whatever HW acceleration you configured in Playback settings.</div>
-                </div>
-
-                <div class="checkboxContainer checkboxContainer-withDescription">
-                    <label>
-                        <input id="FastResolve" name="FastResolve" type="checkbox" is="emby-checkbox" />
-                        <span>Fast playback start</span>
-                    </label>
-                    <div class="fieldDescription">Skips downloading the full YouTube watch page when resolving a stream (uses the lighter innertube API), so videos start faster. Disable if some videos fail to start.</div>
+                    <div class="fieldDescription">YouTube only publishes a combined video+audio file up to 360p; above that, video and audio are separate streams that this plugin merges on the fly using Jellyfin's own ffmpeg (no extra install/config needed) so the full quality, up to real 4K, reaches Jellyfin.</div>
                 </div>
 
                 <div class="inputContainer">
@@ -82,7 +74,7 @@
                 <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="YtDlpExtraArgs">yt-dlp extra args (advanced)</label>
                     <input id="YtDlpExtraArgs" name="YtDlpExtraArgs" type="text" is="emby-input" />
-                    <div class="fieldDescription">Passed to every yt-dlp call. Default: <code>--js-runtimes deno:/usr/bin/deno --ffmpeg-location /usr/lib/jellyfin-ffmpeg/ffmpeg</code> (Deno is required for YouTube's n-challenge so 1080p+ formats resolve). Adjust the deno path to match your container.</div>
+                    <div class="fieldDescription">Passed to every yt-dlp call. Default: <code>--js-runtimes deno:/usr/bin/deno</code> (Deno is required for YouTube's n-challenge so 1080p+ formats resolve). Adjust the deno path to match your container.</div>
                 </div>
 
                 <h3>Indexing</h3>
@@ -115,13 +107,13 @@
                 <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="SearchResultsLimit">Channel search results limit</label>
                     <input id="SearchResultsLimit" name="SearchResultsLimit" type="number" min="1" max="50" is="emby-input" />
-                    <div class="fieldDescription">Maximum number of channels shown when users search on the YouTubeFast/app page (1-50). Each search costs 100 YouTube quota units. Default 20.</div>
+                    <div class="fieldDescription">Maximum number of channels shown when users search on the JellyTuber page (1-50). Each search costs 100 YouTube quota units. Default 20.</div>
                 </div>
 
                 <h3>Sources</h3>
                 <p class="fieldDescription">
                     Les chaînes se gèrent désormais depuis la page utilisateur.<br/>
-                    Rendez-vous sur <code>http(s)://mon-url.domaine/YouTubeFast/app</code>
+                    Rendez-vous sur <code>http(s)://mon-url.domaine/JellyTuber</code>
                 </p>
 
                 <br />
@@ -133,7 +125,7 @@
     </div>
 
     <script type="text/javascript">
-        var YouTubeFast = {
+        var JellyTuber = {
             pluginId: "b9f8e1a2-3c4d-4e5f-8a7b-1c2d3e4f5a6b",
             sources: []
         };
@@ -141,7 +133,7 @@
         function ytfRenderSources() {
             var container = document.querySelector("#SourcesList");
             container.innerHTML = "";
-            YouTubeFast.sources.forEach(function (s, i) {
+            JellyTuber.sources.forEach(function (s, i) {
                 var row = document.createElement("div");
                 row.style.border = "1px solid rgba(255,255,255,0.15)";
                 row.style.padding = "0.75em";
@@ -164,12 +156,12 @@
                 el.addEventListener("change", function () {
                     var i = parseInt(el.getAttribute("data-i"), 10);
                     var k = el.getAttribute("data-k");
-                    YouTubeFast.sources[i][k] = (el.type === "checkbox") ? el.checked : el.value;
+                    JellyTuber.sources[i][k] = (el.type === "checkbox") ? el.checked : el.value;
                 });
             });
             container.querySelectorAll("[data-del]").forEach(function (btn) {
                 btn.addEventListener("click", function () {
-                    YouTubeFast.sources.splice(parseInt(btn.getAttribute("data-del"), 10), 1);
+                    JellyTuber.sources.splice(parseInt(btn.getAttribute("data-del"), 10), 1);
                     ytfRenderSources();
                 });
             });
@@ -177,16 +169,15 @@
 
         function ytfLoad() {
             Dashboard.showLoadingMsg();
-            ApiClient.getPluginConfiguration(YouTubeFast.pluginId).then(function (config) {
+            ApiClient.getPluginConfiguration(JellyTuber.pluginId).then(function (config) {
                 document.querySelector("#ApiKey").value = config.ApiKey || "";
                 document.querySelector("#LibraryFolder").value = config.LibraryFolder || "";
                 document.querySelector("#JellyfinAddress").value = config.JellyfinAddress || "";
                 document.querySelector("#YtDlpPath").value = config.YtDlpPath || "yt-dlp";
                 document.querySelector("#MaxHeight").value = String(config.MaxHeight || 1080);
-                document.querySelector("#FastResolve").checked = config.FastResolve !== false;
                 document.querySelector("#AutoCreateUserLibraries").checked = config.AutoCreateUserLibraries !== false;
                 document.querySelector("#YtDlpFormatOverride").value = config.YtDlpFormatOverride || "";
-                var defaultYtDlpArgs = "--js-runtimes deno:/usr/bin/deno --ffmpeg-location /usr/lib/jellyfin-ffmpeg/ffmpeg";
+                var defaultYtDlpArgs = "--js-runtimes deno:/usr/bin/deno";
                 document.querySelector("#YtDlpExtraArgs").value =
                     (config.YtDlpExtraArgs == null || config.YtDlpExtraArgs === "") ? defaultYtDlpArgs : config.YtDlpExtraArgs;
                 document.querySelector("#KeepDays").value = config.KeepDays != null ? config.KeepDays : 60;
@@ -201,13 +192,12 @@
         function ytfSave(e) {
             e.preventDefault();
             Dashboard.showLoadingMsg();
-            ApiClient.getPluginConfiguration(YouTubeFast.pluginId).then(function (config) {
+            ApiClient.getPluginConfiguration(JellyTuber.pluginId).then(function (config) {
                 config.ApiKey = document.querySelector("#ApiKey").value;
                 config.LibraryFolder = document.querySelector("#LibraryFolder").value;
                 config.JellyfinAddress = document.querySelector("#JellyfinAddress").value;
                 config.YtDlpPath = document.querySelector("#YtDlpPath").value;
                 config.MaxHeight = parseInt(document.querySelector("#MaxHeight").value, 10) || 1080;
-                config.FastResolve = document.querySelector("#FastResolve").checked;
                 config.AutoCreateUserLibraries = document.querySelector("#AutoCreateUserLibraries").checked;
                 config.YtDlpFormatOverride = document.querySelector("#YtDlpFormatOverride").value;
                 config.YtDlpExtraArgs = document.querySelector("#YtDlpExtraArgs").value;
@@ -216,15 +206,15 @@
                 config.FetchVideoDetails = document.querySelector("#FetchVideoDetails").checked;
                 config.ShortsMaxProbeSeconds = parseInt(document.querySelector("#ShortsMaxProbeSeconds").value, 10) || 180;
                 config.SearchResultsLimit = Math.min(50, Math.max(1, parseInt(document.querySelector("#SearchResultsLimit").value, 10) || 20));
-                ApiClient.updatePluginConfiguration(YouTubeFast.pluginId, config).then(function (result) {
+                ApiClient.updatePluginConfiguration(JellyTuber.pluginId, config).then(function (result) {
                     Dashboard.processPluginConfigurationUpdateResult(result);
                 });
             });
             return false;
         }
 
-        document.querySelector("#YouTubeFastConfigPage").addEventListener("pageshow", ytfLoad);
-        document.querySelector("#YouTubeFastConfigForm").addEventListener("submit", ytfSave);
+        document.querySelector("#JellyTuberConfigPage").addEventListener("pageshow", ytfLoad);
+        document.querySelector("#JellyTuberConfigForm").addEventListener("submit", ytfSave);
     </script>
 </div>
 </body>

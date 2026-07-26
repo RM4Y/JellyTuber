@@ -5,9 +5,9 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Plugin.YouTubeFast.Configuration;
-using Jellyfin.Plugin.YouTubeFast.Services;
-using Jellyfin.Plugin.YouTubeFast.YouTube;
+using Jellyfin.Plugin.JellyTuber.Configuration;
+using Jellyfin.Plugin.JellyTuber.Services;
+using Jellyfin.Plugin.JellyTuber.YouTube;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
@@ -16,7 +16,7 @@ using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.YouTubeFast.ScheduledTasks;
+namespace Jellyfin.Plugin.JellyTuber.ScheduledTasks;
 
 /// <summary>
 /// Indexes every configured source via the YouTube Data API and writes the
@@ -46,9 +46,9 @@ public class YouTubeSyncTask : IScheduledTask
     }
 
     public string Name => "Sync YouTube (Fast)";
-    public string Key => "YouTubeFastSync";
+    public string Key => "JellyTuberSync";
     public string Description => "Index configured YouTube channels/playlists via the Data API.";
-    public string Category => "YouTube Fast";
+    public string Category => "JellyTuber";
 
     public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
     {
@@ -79,22 +79,29 @@ public class YouTubeSyncTask : IScheduledTask
 
         // Effective sources = admin-configured sources + each user's self-added
         // channels (routed into a per-user folder: LibraryFolder/UserName).
-        var effectiveSources = new List<SourceItem>(config.Sources);
-        foreach (var uc in config.UserChannels)
+        // Snapshot config.Sources/UserChannels under the lock: they're plain
+        // Lists that the self-service endpoints can mutate concurrently, and
+        // enumerating one mid-mutation throws.
+        var effectiveSources = new List<SourceItem>();
+        lock (Plugin.ConfigLock)
         {
-            if (string.IsNullOrWhiteSpace(uc.Url))
+            effectiveSources.AddRange(config.Sources);
+            foreach (var uc in config.UserChannels)
             {
-                continue;
-            }
+                if (string.IsNullOrWhiteSpace(uc.Url))
+                {
+                    continue;
+                }
 
-            effectiveSources.Add(new SourceItem
-            {
-                Name = uc.Name,
-                Url = uc.Url,
-                Mode = "Series",
-                ExcludeShorts = uc.ExcludeShorts,
-                DestinationFolder = Path.Combine(config.LibraryFolder, SanitizeUser(uc.UserName))
-            });
+                effectiveSources.Add(new SourceItem
+                {
+                    Name = uc.Name,
+                    Url = uc.Url,
+                    Mode = "Series",
+                    ExcludeShorts = uc.ExcludeShorts,
+                    DestinationFolder = Path.Combine(config.LibraryFolder, SanitizeUser(uc.UserName))
+                });
+            }
         }
 
         if (effectiveSources.Count == 0)
@@ -183,7 +190,7 @@ public class YouTubeSyncTask : IScheduledTask
         {
             try
             {
-                librariesCreated = EnsureUserLibraries(config);
+                librariesCreated = await EnsureUserLibrariesAsync(config).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -385,7 +392,7 @@ public class YouTubeSyncTask : IScheduledTask
             ct.ThrowIfCancellationRequested();
 
             episode++;
-            var strmTarget = $"{baseAddress}/YouTubeFast/Stream/{video.VideoId}";
+            var strmTarget = $"{baseAddress}/JellyTuber/Stream/{video.VideoId}";
 
             var created = await writer.WriteVideoAsync(sourceRoot, source, video, episode, strmTarget, videoIndex, ct)
                 .ConfigureAwait(false);
@@ -423,9 +430,15 @@ public class YouTubeSyncTask : IScheduledTask
         var configDirty = false;
         var written = 0;
 
-        var byUser = config.UserVideos
-            .Where(v => !string.IsNullOrWhiteSpace(v.VideoId))
-            .GroupBy(v => SanitizeUser(v.UserName));
+        // Snapshot under the lock so a concurrent self-service Add/Remove can't
+        // mutate config.UserVideos (a plain List) while we enumerate/group it.
+        List<UserVideo> snapshot;
+        lock (Plugin.ConfigLock)
+        {
+            snapshot = config.UserVideos.Where(v => !string.IsNullOrWhiteSpace(v.VideoId)).ToList();
+        }
+
+        var byUser = snapshot.GroupBy(v => SanitizeUser(v.UserName));
 
         foreach (var group in byUser)
         {
@@ -492,7 +505,7 @@ public class YouTubeSyncTask : IScheduledTask
                     ThumbnailUrl = uv.Thumbnail
                 };
 
-                var strmTarget = $"{baseAddress}/YouTubeFast/Stream/{uv.VideoId}";
+                var strmTarget = $"{baseAddress}/JellyTuber/Stream/{uv.VideoId}";
                 var created = await writer.WriteVideoAsync(channelRoot, source, video, episode, strmTarget, videoIndex, ct)
                     .ConfigureAwait(false);
 
@@ -514,7 +527,10 @@ public class YouTubeSyncTask : IScheduledTask
 
         if (configDirty)
         {
-            Plugin.Instance?.Save();
+            lock (Plugin.ConfigLock)
+            {
+                Plugin.Instance?.Save();
+            }
         }
 
         return (roots, written);
@@ -526,7 +542,7 @@ public class YouTubeSyncTask : IScheduledTask
     /// Jellyfin (10.11+) validates the path on add, so the folder is created
     /// first.
     /// </summary>
-    private bool EnsureUserLibraries(PluginConfiguration config)
+    private async Task<bool> EnsureUserLibrariesAsync(PluginConfiguration config)
     {
         var created = false;
 
@@ -606,10 +622,9 @@ public class YouTubeSyncTask : IScheduledTask
                 };
 
                 // CollectionTypeOptions.movies => a "Movies/Film" library.
-                _libraryManager
+                await _libraryManager
                     .AddVirtualFolder(libraryName, CollectionTypeOptions.movies, options, refreshLibrary: false)
-                    .GetAwaiter()
-                    .GetResult();
+                    .ConfigureAwait(false);
 
                 existing.Add(libraryName);
                 created = true;

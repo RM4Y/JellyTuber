@@ -1,4 +1,4 @@
-# Distributing YouTube Fast as a one-click Jellyfin repository
+# Distributing JellyTuber as a one-click Jellyfin repository
 
 Once set up, you (and anyone you share with) install and update the plugin from
 inside Jellyfin — no more manual `dotnet publish` / copying DLLs.
@@ -25,12 +25,12 @@ The included GitHub Actions workflow (`.github/workflows/release.yml`) does
 everything on a tag push:
 
 ```bash
-# bump the version in Jellyfin.Plugin.YouTubeFast/meta.json first, then:
+# bump the version in meta.json first, then:
 git tag v1.5.0
 git push origin v1.5.0
 ```
 
-GitHub then builds the DLL, packages `youtube-fast-1.5.0.0.zip`, computes its
+GitHub then builds the DLL, packages `jellytuber-1.5.0.0.zip`, computes its
 checksum, creates a Release with the zip attached, and commits the updated
 `manifest.json`. Within a few minutes the new version shows up in Jellyfin.
 
@@ -44,15 +44,15 @@ If you'd rather not use CI:
 
 ```bash
 REPO="<you>/<repo>" ./build-release.sh 1.5.0.0
-gh release create v1.5.0.0 youtube-fast-1.5.0.0.zip --notes "Release 1.5.0.0"
+gh release create v1.5.0.0 jellytuber-1.5.0.0.zip --notes "Release 1.5.0.0"
 git add manifest.json && git commit -m "release 1.5.0.0" && git push
 ```
 
 ## Installing in Jellyfin
 
 1. **Dashboard → Plugins → Repositories → +**
-2. Name: `YouTube Fast`, URL: your `raw.githubusercontent.com/.../manifest.json`
-3. **Dashboard → Plugins → Catalog** → find **YouTube Fast** → Install
+2. Name: `JellyTuber`, URL: your `raw.githubusercontent.com/.../manifest.json`
+3. **Dashboard → Plugins → Catalog** → find **JellyTuber** → Install
 4. Restart Jellyfin.
 
 Updates: when you publish a new version, Jellyfin shows an update badge in the

@@ -12,23 +12,23 @@
 set -euo pipefail
 
 GUID="b9f8e1a2-3c4d-4e5f-8a7b-1c2d3e4f5a6b"
-NAME="YouTube Fast"
+NAME="JellyTuber"
 TARGET_ABI="10.11.6.0"
-PROJECT="Jellyfin.Plugin.YouTubeFast/Jellyfin.Plugin.YouTubeFast.csproj"
+PROJECT="Jellyfin.Plugin.JellyTuber.csproj"
 DESC="Index YouTube channels and playlists via the YouTube Data API, stream on demand with yt-dlp."
 
-VERSION="${1:-$(jq -r .version Jellyfin.Plugin.YouTubeFast/meta.json)}"
-REPO="${REPO:-YOUR_GH_USER/jellyfin-youtube-fast}"
+VERSION="${1:-$(jq -r .version meta.json)}"
+REPO="${REPO:-YOUR_GH_USER/jellyfin-jellytuber}"
 TAG="${TAG:-v${VERSION}}"
 
 echo ">> Building $NAME $VERSION"
 dotnet publish "$PROJECT" -c Release -o publish
 
 rm -rf stage && mkdir -p stage
-cp publish/Jellyfin.Plugin.YouTubeFast.dll stage/
-jq --arg v "$VERSION" '.version=$v' Jellyfin.Plugin.YouTubeFast/meta.json > stage/meta.json
+cp publish/Jellyfin.Plugin.JellyTuber.dll stage/
+jq --arg v "$VERSION" '.version=$v' meta.json > stage/meta.json
 
-ZIP="youtube-fast-${VERSION}.zip"
+ZIP="jellytuber-${VERSION}.zip"
 rm -f "$ZIP"
 ( cd stage && zip -r "../$ZIP" . >/dev/null )
 

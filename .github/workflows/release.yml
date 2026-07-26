@@ -1,0 +1,91 @@
+name: Release plugin
+
+# Push a tag like v1.5.0 and this builds the DLL, packages the plugin zip,
+# computes its checksum, creates a GitHub Release with the zip, and updates
+# manifest.json so Jellyfin sees the new version.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  GUID: b9f8e1a2-3c4d-4e5f-8a7b-1c2d3e4f5a6b
+  TARGET_ABI: 10.11.6.0
+  PROJECT: Jellyfin.Plugin.JellyTuber.csproj
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Resolve version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"          # e.g. v1.5.0
+          V="${TAG#v}"                       # 1.5.0
+          IFS='.' read -r a b c d <<< "$V"
+          VERSION="${a:-1}.${b:-0}.${c:-0}.${d:-0}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: dotnet publish "$PROJECT" -c Release -o publish
+
+      - name: Package
+        id: pkg
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          mkdir -p stage
+          cp publish/Jellyfin.Plugin.JellyTuber.dll stage/
+          jq --arg v "$VERSION" '.version=$v' meta.json > stage/meta.json
+          ZIP="jellytuber-${VERSION}.zip"
+          (cd stage && zip -r "../$ZIP" . >/dev/null)
+          CHK=$(md5sum "$ZIP" | cut -d' ' -f1)
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "checksum=$CHK" >> "$GITHUB_OUTPUT"
+
+      - name: Update manifest.json
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          TAG="${{ steps.ver.outputs.tag }}"
+          ZIP="${{ steps.pkg.outputs.zip }}"
+          CHK="${{ steps.pkg.outputs.checksum }}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${ZIP}"
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          [ -f manifest.json ] || echo '[]' > manifest.json
+          NEWVER=$(jq -n --arg v "$VERSION" --arg t "$TARGET_ABI" --arg u "$URL" --arg c "$CHK" --arg ts "$TS" \
+            '{version:$v, targetAbi:$t, sourceUrl:$u, checksum:$c, timestamp:$ts, changelog:("Release " + $v)}')
+          jq --arg guid "$GUID" --arg name "JellyTuber" \
+             --arg desc "Index YouTube channels and playlists via the YouTube Data API, stream on demand with yt-dlp." \
+             --argjson nv "$NEWVER" '
+            (map(.guid) | index($guid)) as $i
+            | if $i == null
+              then . + [{guid:$guid, name:$name, description:$desc, overview:$desc, owner:"self", category:"Channels", versions:[$nv]}]
+              else .[$i].versions |= ([$nv] + (map(select(.version != $nv.version)))) end
+          ' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
+
+      - name: Commit manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "Update manifest for ${{ steps.ver.outputs.tag }}" || echo "no changes"
+          git push origin HEAD:main
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pkg.outputs.zip }}

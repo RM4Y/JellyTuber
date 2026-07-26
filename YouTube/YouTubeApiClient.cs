@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 using System.Web;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.YouTubeFast.YouTube;
+namespace Jellyfin.Plugin.JellyTuber.YouTube;
 
 /// <summary>
 /// Thin wrapper around the YouTube Data API v3.

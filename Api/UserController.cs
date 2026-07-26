@@ -4,16 +4,16 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
-using Jellyfin.Plugin.YouTubeFast.Configuration;
-using Jellyfin.Plugin.YouTubeFast.ScheduledTasks;
-using Jellyfin.Plugin.YouTubeFast.Services;
-using Jellyfin.Plugin.YouTubeFast.YouTube;
+using Jellyfin.Plugin.JellyTuber.Configuration;
+using Jellyfin.Plugin.JellyTuber.ScheduledTasks;
+using Jellyfin.Plugin.JellyTuber.Services;
+using Jellyfin.Plugin.JellyTuber.YouTube;
 using MediaBrowser.Model.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.YouTubeFast.Api;
+namespace Jellyfin.Plugin.JellyTuber.Api;
 
 /// <summary>
 /// Self-service endpoints for Jellyfin users to manage their own YouTube
@@ -36,7 +36,7 @@ public class UserController : ControllerBase
     }
 
     /// <summary>The self-service web page (users log in client-side with Jellyfin creds).</summary>
-    [HttpGet("YouTubeFast/app")]
+    [HttpGet("JellyTuber")]
     [AllowAnonymous]
     public ContentResult App() => new()
     {
@@ -44,7 +44,7 @@ public class UserController : ControllerBase
         Content = PageHtml.Html
     };
 
-    [HttpPost("YouTubeFast/User/Search")]
+    [HttpPost("JellyTuber/User/Search")]
     [Authorize]
     public async Task<ActionResult> Search([FromBody] SearchRequest req)
     {
@@ -87,7 +87,7 @@ public class UserController : ControllerBase
         }
     }
 
-    [HttpGet("YouTubeFast/User/Channels")]
+    [HttpGet("JellyTuber/User/Channels")]
     [Authorize]
     public ActionResult Channels([FromQuery] string userId)
     {
@@ -99,7 +99,7 @@ public class UserController : ControllerBase
         return new JsonResult(mine);
     }
 
-    [HttpPost("YouTubeFast/User/Add")]
+    [HttpPost("JellyTuber/User/Add")]
     [Authorize]
     public ActionResult Add([FromBody] AddRequest req)
     {
@@ -109,52 +109,63 @@ public class UserController : ControllerBase
             return BadRequest();
         }
 
-        if (cfg.UserChannels.Any(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId))
+        lock (Plugin.ConfigLock)
         {
-            return new JsonResult(new { status = "exists" });
+            if (cfg.UserChannels.Any(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId))
+            {
+                return new JsonResult(new { status = "exists" });
+            }
+
+            cfg.UserChannels.Add(new UserChannel
+            {
+                UserId = req.UserId,
+                UserName = req.UserName ?? "user",
+                ChannelId = req.ChannelId,
+                Name = req.Name ?? req.ChannelId,
+                Url = $"https://www.youtube.com/channel/{req.ChannelId}",
+                ExcludeShorts = true,
+                Thumbnail = req.Thumbnail ?? string.Empty
+            });
+            Plugin.Instance.Save();
         }
 
-        cfg.UserChannels.Add(new UserChannel
-        {
-            UserId = req.UserId,
-            UserName = req.UserName ?? "user",
-            ChannelId = req.ChannelId,
-            Name = req.Name ?? req.ChannelId,
-            Url = $"https://www.youtube.com/channel/{req.ChannelId}",
-            ExcludeShorts = true,
-            Thumbnail = req.Thumbnail ?? string.Empty
-        });
-        Plugin.Instance.Save();
         return new JsonResult(new { status = "added" });
     }
 
-    [HttpPost("YouTubeFast/User/Remove")]
+    [HttpPost("JellyTuber/User/Remove")]
     [Authorize]
     public ActionResult Remove([FromBody] ChannelRef req)
     {
         var cfg = Plugin.Instance!.Configuration;
-        var removed = cfg.UserChannels.RemoveAll(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId);
-        if (removed > 0)
+        int removed;
+        lock (Plugin.ConfigLock)
         {
-            Plugin.Instance.Save();
+            removed = cfg.UserChannels.RemoveAll(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId);
+            if (removed > 0)
+            {
+                Plugin.Instance.Save();
+            }
         }
 
         return new JsonResult(new { removed });
     }
 
-    [HttpPost("YouTubeFast/User/ToggleShorts")]
+    [HttpPost("JellyTuber/User/ToggleShorts")]
     [Authorize]
     public ActionResult ToggleShorts([FromBody] ToggleRequest req)
     {
         var cfg = Plugin.Instance!.Configuration;
-        var entry = cfg.UserChannels.FirstOrDefault(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId);
-        if (entry is null)
+        lock (Plugin.ConfigLock)
         {
-            return NotFound();
-        }
+            var entry = cfg.UserChannels.FirstOrDefault(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId);
+            if (entry is null)
+            {
+                return NotFound();
+            }
 
-        entry.ExcludeShorts = req.ExcludeShorts;
-        Plugin.Instance.Save();
+            entry.ExcludeShorts = req.ExcludeShorts;
+            Plugin.Instance.Save();
+        }
 
         // Re-sync so the change is reflected on disk/in the library: enabling
         // exclusion deletes existing Shorts, disabling it brings them back.
@@ -163,7 +174,7 @@ public class UserController : ControllerBase
     }
 
     /// <summary>Queue the "Sync YouTube (Fast)" scheduled task.</summary>
-    [HttpPost("YouTubeFast/User/Sync")]
+    [HttpPost("JellyTuber/User/Sync")]
     [Authorize]
     public ActionResult Sync()
     {
@@ -173,7 +184,7 @@ public class UserController : ControllerBase
 
     // ---- Individual videos (added by URL) ----
 
-    [HttpGet("YouTubeFast/User/Videos")]
+    [HttpGet("JellyTuber/User/Videos")]
     [Authorize]
     public ActionResult Videos([FromQuery] string userId)
     {
@@ -185,7 +196,7 @@ public class UserController : ControllerBase
         return new JsonResult(mine);
     }
 
-    [HttpPost("YouTubeFast/User/AddVideo")]
+    [HttpPost("JellyTuber/User/AddVideo")]
     [Authorize]
     public async Task<ActionResult> AddVideo([FromBody] AddVideoRequest req)
     {
@@ -206,9 +217,12 @@ public class UserController : ControllerBase
             return BadRequest("Lien vidéo YouTube invalide.");
         }
 
-        if (cfg.UserVideos.Any(v => v.UserId == req.UserId && v.VideoId == videoId))
+        lock (Plugin.ConfigLock)
         {
-            return new JsonResult(new { status = "exists" });
+            if (cfg.UserVideos.Any(v => v.UserId == req.UserId && v.VideoId == videoId))
+            {
+                return new JsonResult(new { status = "exists" });
+            }
         }
 
         // The page is "YouTube without Shorts": refuse Shorts here too. A
@@ -252,8 +266,17 @@ public class UserController : ControllerBase
                 Description = meta.Description,
                 PublishedAt = meta.PublishedAt
             };
-            cfg.UserVideos.Add(entry);
-            Plugin.Instance.Save();
+
+            lock (Plugin.ConfigLock)
+            {
+                if (cfg.UserVideos.Any(v => v.UserId == req.UserId && v.VideoId == videoId))
+                {
+                    return new JsonResult(new { status = "exists" });
+                }
+
+                cfg.UserVideos.Add(entry);
+                Plugin.Instance.Save();
+            }
 
             return new JsonResult(new { status = "added", videoId, title = entry.Title, thumbnail = entry.Thumbnail });
         }
@@ -264,15 +287,19 @@ public class UserController : ControllerBase
         }
     }
 
-    [HttpPost("YouTubeFast/User/RemoveVideo")]
+    [HttpPost("JellyTuber/User/RemoveVideo")]
     [Authorize]
     public ActionResult RemoveVideo([FromBody] VideoRef req)
     {
         var cfg = Plugin.Instance!.Configuration;
-        var removed = cfg.UserVideos.RemoveAll(v => v.UserId == req.UserId && v.VideoId == req.VideoId);
-        if (removed > 0)
+        int removed;
+        lock (Plugin.ConfigLock)
         {
-            Plugin.Instance.Save();
+            removed = cfg.UserVideos.RemoveAll(v => v.UserId == req.UserId && v.VideoId == req.VideoId);
+            if (removed > 0)
+            {
+                Plugin.Instance.Save();
+            }
         }
 
         return new JsonResult(new { removed });

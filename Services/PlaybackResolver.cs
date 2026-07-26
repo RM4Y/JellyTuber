@@ -1,20 +1,52 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Plugin.YouTubeFast.Configuration;
+using Jellyfin.Plugin.JellyTuber.Configuration;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.YouTubeFast.Services;
+namespace Jellyfin.Plugin.JellyTuber.Services;
 
 /// <summary>
-/// Resolves a YouTube video id to a directly playable stream URL using yt-dlp,
-/// caching the result for a short window (YouTube URLs are time-limited anyway).
+/// What a video resolves to. YouTube only publishes premuxed (single-URL,
+/// video+audio combined) formats up to 360p; everything from 720p up is DASH
+/// - separate video-only and audio-only URLs that need muxing. So resolution
+/// yields either:
+///   - VideoUrl + AudioUrl: the common case for anything above 360p. The
+///     caller muxes them on the fly with ffmpeg (stream copy, no re-encode).
+///   - DirectUrl: a single premuxed/HLS URL, kept as a fallback for the rare
+///     video that only exposes that.
+/// </summary>
+public sealed class ResolvedStream
+{
+    public string? DirectUrl { get; init; }
+
+    public string? VideoUrl { get; init; }
+
+    public string? AudioUrl { get; init; }
+
+    /// <summary>Video duration in seconds, 0 if unknown. Used to approximate seek offsets.</summary>
+    public double DurationSeconds { get; init; }
+
+    /// <summary>Estimated total byte size of the muxed output, 0 if unknown.</summary>
+    public long EstimatedBytes { get; init; }
+}
+
+/// <summary>
+/// Resolves a YouTube video id to a playable source using yt-dlp, caching the
+/// result for a short window (YouTube URLs are time-limited anyway).
 /// </summary>
 public class PlaybackResolver
 {
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new();
+
+    /// <summary>Once the cache grows past this many entries, expired ones are swept out.</summary>
+    private const int CacheSweepThreshold = 500;
 
     private readonly ILogger _logger;
 
@@ -23,49 +55,62 @@ public class PlaybackResolver
         _logger = logger;
     }
 
-    public async Task<string?> ResolveAsync(string videoId, CancellationToken ct)
+    public async Task<ResolvedStream?> ResolveAsync(string videoId, CancellationToken ct)
     {
         var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
         if (Cache.TryGetValue(videoId, out var cached) && cached.ExpiresUtc > DateTime.UtcNow)
         {
-            return cached.Url;
+            return cached.Stream;
         }
 
-        // Always aim for the best-quality HLS: the master manifest (adaptive
-        // bitrate) first, then a single best HLS stream. Native players handle
-        // HLS well; browsers are best directed to a native app. A combined mp4
-        // remains only as a deep last resort so a video that exposes no HLS at
-        // all still plays something.
-        var url = await RunYtDlpAsync(config, videoId, ResolveMode.HlsManifest, ct).ConfigureAwait(false);
+        var resolved = await RunYtDlpAsync(config, videoId, ct).ConfigureAwait(false);
 
-        if (string.IsNullOrEmpty(url))
-        {
-            url = await RunYtDlpAsync(config, videoId, ResolveMode.Combined, ct).ConfigureAwait(false);
-        }
-
-        if (!string.IsNullOrEmpty(url))
+        if (resolved is not null)
         {
             Cache[videoId] = new CacheEntry
             {
-                Url = url!,
+                Stream = resolved,
                 ExpiresUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, config.LinkCacheMinutes))
             };
+
+            SweepExpiredIfLarge();
         }
 
-        return url;
+        return resolved;
     }
 
-    private enum ResolveMode
+    /// <summary>
+    /// Drops a cached resolution so the next <see cref="ResolveAsync"/> call
+    /// re-resolves from scratch. YouTube's signed URLs can stop working well
+    /// before the nominal validity window we cache them for (some formats
+    /// start returning 403 within minutes), so a caller that hits that should
+    /// invalidate and retry rather than keep reusing a URL that's already
+    /// dead until the cache entry naturally expires.
+    /// </summary>
+    public static void Invalidate(string videoId)
     {
-        /// <summary>Print the HLS master manifest URL (multivariant playlist).</summary>
-        HlsManifest,
-
-        /// <summary>Resolve the best HLS stream (with a combined-mp4 last resort).</summary>
-        Combined
+        Cache.TryRemove(videoId, out _);
     }
 
-    private async Task<string?> RunYtDlpAsync(PluginConfiguration config, string videoId, ResolveMode mode, CancellationToken ct)
+    private static void SweepExpiredIfLarge()
+    {
+        if (Cache.Count <= CacheSweepThreshold)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        foreach (var kvp in Cache)
+        {
+            if (kvp.Value.ExpiresUtc <= now)
+            {
+                Cache.TryRemove(kvp.Key, out _);
+            }
+        }
+    }
+
+    private async Task<ResolvedStream?> RunYtDlpAsync(PluginConfiguration config, string videoId, CancellationToken ct)
     {
         var psi = new ProcessStartInfo
         {
@@ -76,29 +121,17 @@ public class PlaybackResolver
             CreateNoWindow = true
         };
 
-        if (mode == ResolveMode.HlsManifest)
-        {
-            // Select an HLS format, then print ITS master manifest URL (shared by
-            // all variants) rather than a single variant. The browser then does
-            // adaptive bitrate up to the best H.264 variant on its own.
-            psi.ArgumentList.Add("--print");
-            psi.ArgumentList.Add("%(manifest_url)s");
-            psi.ArgumentList.Add("-f");
-            psi.ArgumentList.Add("b[protocol^=m3u8]/bv*[protocol^=m3u8]");
-        }
-        else
-        {
-            // -g prints the resolved media URL(s). We aim for a single playable
-            // URL (Jellyfin then handles transcoding / HW acceleration itself).
-            psi.ArgumentList.Add("-g");
-            psi.ArgumentList.Add("-f");
-            psi.ArgumentList.Add(BuildFormat(config));
-        }
+        // -j dumps the resolved format info as JSON instead of downloading -
+        // gives us the URL(s) for the selected format PLUS duration/filesize,
+        // which we need to approximate seek offsets when muxing on the fly.
+        psi.ArgumentList.Add("-j");
+        psi.ArgumentList.Add("-f");
+        psi.ArgumentList.Add(BuildFormat(config));
 
         // NOTE: we deliberately do NOT force the iOS player client. YouTube now
         // gates its iOS HTTPS formats behind a GVS PO token, so those formats get
-        // skipped and resolution fails. The default client already exposes a
-        // single combined HLS stream (up to 1080p+) that resolves cleanly.
+        // skipped and resolution fails. The default client already exposes
+        // DASH formats up to 4K/8K that resolve cleanly.
 
         // --- Speed flags ---
         // Never expand playlists, keep output terse, and fail fast on stalls.
@@ -120,14 +153,6 @@ public class PlaybackResolver
         catch
         {
             // ignore - fall back to yt-dlp's default cache location
-        }
-
-        // Fast mode: skip downloading the full watch HTML page (~1 MB) and rely
-        // on the lighter innertube API. Disable if a video fails to resolve.
-        if (config.FastResolve)
-        {
-            psi.ArgumentList.Add("--extractor-args");
-            psi.ArgumentList.Add("youtube:player_skip=webpage,configs");
         }
 
         // Any advanced extra args the user configured.
@@ -155,22 +180,11 @@ public class PlaybackResolver
 
             if (process.ExitCode != 0)
             {
-                _logger.LogWarning("yt-dlp ({Mode}) failed for {VideoId}: {Error}",
-                    mode, videoId, stderr.Trim());
+                _logger.LogWarning("yt-dlp failed for {VideoId}: {Error}", videoId, stderr.Trim());
                 return null;
             }
 
-            // First non-empty http(s) line is the playable URL / manifest.
-            foreach (var line in stdout.Split('\n'))
-            {
-                var trimmed = line.Trim();
-                if (trimmed.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                {
-                    return trimmed;
-                }
-            }
-
-            return null;
+            return ParseInfo(stdout, videoId);
         }
         catch (Exception ex)
         {
@@ -179,31 +193,184 @@ public class PlaybackResolver
         }
     }
 
+    private ResolvedStream? ParseInfo(string stdout, string videoId)
+    {
+        // -j prints exactly one JSON object per line; with --no-playlist there's
+        // exactly one video, so take the first non-empty line.
+        var line = stdout.Split('\n').FirstOrDefault(l => l.Trim().StartsWith('{'));
+        if (line is null)
+        {
+            _logger.LogWarning("yt-dlp returned no format info for {VideoId}", videoId);
+            return null;
+        }
+
+        YtDlpInfo? info;
+        try
+        {
+            info = JsonSerializer.Deserialize<YtDlpInfo>(line);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Could not parse yt-dlp output for {VideoId}", videoId);
+            return null;
+        }
+
+        if (info is null)
+        {
+            return null;
+        }
+
+        var duration = info.Duration ?? 0;
+
+        if (info.RequestedFormats is { Count: >= 2 } formats)
+        {
+            var video = formats.FirstOrDefault(f => !string.IsNullOrEmpty(f.Vcodec) && f.Vcodec != "none");
+            var audio = formats.FirstOrDefault(f => !string.IsNullOrEmpty(f.Acodec) && f.Acodec != "none" && f != video);
+
+            if (video?.Url is not null && audio?.Url is not null)
+            {
+                var bytes = EstimateBytes(video, duration) + EstimateBytes(audio, duration);
+                return new ResolvedStream
+                {
+                    VideoUrl = video.Url,
+                    AudioUrl = audio.Url,
+                    DurationSeconds = duration,
+                    EstimatedBytes = bytes
+                };
+            }
+        }
+
+        if (!string.IsNullOrEmpty(info.Url))
+        {
+            return new ResolvedStream
+            {
+                DirectUrl = info.Url,
+                DurationSeconds = duration,
+                EstimatedBytes = EstimateBytes(info, duration)
+            };
+        }
+
+        _logger.LogWarning("yt-dlp resolved {VideoId} but returned no usable URL", videoId);
+        return null;
+    }
+
+    private static long EstimateBytes(IHasFormatSize f, double durationSeconds)
+    {
+        if (f.Filesize is > 0)
+        {
+            return (long)f.Filesize.Value;
+        }
+
+        if (f.FilesizeApprox is > 0)
+        {
+            return (long)f.FilesizeApprox.Value;
+        }
+
+        if (f.Tbr is > 0 && durationSeconds > 0)
+        {
+            // tbr is in kbit/s.
+            return (long)(f.Tbr.Value * 1000 / 8 * durationSeconds);
+        }
+
+        return 0;
+    }
+
     /// <summary>
-    /// Builds a yt-dlp format selector that resolves to ONE playable URL,
-    /// honouring MaxHeight. Honours the user's manual override.
+    /// Builds a yt-dlp format selector honouring MaxHeight. YouTube only
+    /// publishes H.264 up to 1080p60; above that, VP9/AV1 are the only
+    /// codecs it exposes at all (1440p/2160p), so a hard preference for H.264
+    /// would silently cap 1440p/2160p requests back down to 1080p. Below
+    /// 1080p we still prefer H.264+AAC for maximum client compatibility; at
+    /// or above 1080p we take the best available codec so higher heights are
+    /// actually reachable.
+    ///
+    /// Deliberately NOT forcing AAC audio at every height (which would let
+    /// Jellyfin Direct Play instead of wrapping our stream in its own
+    /// transcode): Jellyfin's own ffmpeg verifies the real timestamp it
+    /// lands on after an input seek and corrects for it, but a raw client
+    /// player doing Direct Play has no such correction - it just trusts our
+    /// approximate byte-offset-to-time math outright. That traded a slower
+    /// but correct seek for a faster one that could land in the wrong place
+    /// entirely (or find nothing there). Slower-but-correct wins.
+    ///
+    /// A premuxed single format is kept as a last resort. Honours the
+    /// user's manual override.
     /// </summary>
     private static string BuildFormat(PluginConfiguration config)
     {
-        var h = config.MaxHeight > 0 ? config.MaxHeight : 1080;
-        var hh = h.ToString(System.Globalization.CultureInfo.InvariantCulture);
-
-        // Honour a manual override if the user set one.
         if (!string.IsNullOrWhiteSpace(config.YtDlpFormatOverride))
         {
             return config.YtDlpFormatOverride.Trim();
         }
 
-        // HLS first, in preference order: H.264 HLS <=H -> any HLS <=H -> any
-        // HLS. A combined mp4 (<=H, then itag 18) is kept ONLY as a deep last
-        // resort so a video that exposes no HLS at all still plays something.
-        return $"b[protocol^=m3u8][vcodec^=avc1][height<=?{hh}]/b[protocol^=m3u8][height<=?{hh}]/b[protocol^=m3u8]/" +
-               $"best[ext=mp4][vcodec!=none][acodec!=none][height<=?{hh}]/18";
+        var h = config.MaxHeight > 0 ? config.MaxHeight : 1080;
+        var hh = h.ToString(CultureInfo.InvariantCulture);
+
+        if (h < 1080)
+        {
+            return $"bv*[vcodec^=avc1][height<=?{hh}]+ba[acodec^=mp4a]/" +
+                   $"bv*[height<=?{hh}]+ba/" +
+                   $"b[height<=?{hh}]/best";
+        }
+
+        return $"bv*[height<=?{hh}]+ba/b[height<=?{hh}]/best";
     }
 
     private sealed class CacheEntry
     {
-        public string Url { get; set; } = string.Empty;
+        public ResolvedStream Stream { get; set; } = null!;
+
         public DateTime ExpiresUtc { get; set; }
+    }
+
+    private interface IHasFormatSize
+    {
+        double? Filesize { get; }
+
+        double? FilesizeApprox { get; }
+
+        double? Tbr { get; }
+    }
+
+    private sealed class YtDlpFormatInfo : IHasFormatSize
+    {
+        [JsonPropertyName("url")]
+        public string? Url { get; set; }
+
+        [JsonPropertyName("vcodec")]
+        public string? Vcodec { get; set; }
+
+        [JsonPropertyName("acodec")]
+        public string? Acodec { get; set; }
+
+        [JsonPropertyName("filesize")]
+        public double? Filesize { get; set; }
+
+        [JsonPropertyName("filesize_approx")]
+        public double? FilesizeApprox { get; set; }
+
+        [JsonPropertyName("tbr")]
+        public double? Tbr { get; set; }
+    }
+
+    private sealed class YtDlpInfo : IHasFormatSize
+    {
+        [JsonPropertyName("url")]
+        public string? Url { get; set; }
+
+        [JsonPropertyName("duration")]
+        public double? Duration { get; set; }
+
+        [JsonPropertyName("requested_formats")]
+        public System.Collections.Generic.List<YtDlpFormatInfo>? RequestedFormats { get; set; }
+
+        [JsonPropertyName("filesize")]
+        public double? Filesize { get; set; }
+
+        [JsonPropertyName("filesize_approx")]
+        public double? FilesizeApprox { get; set; }
+
+        [JsonPropertyName("tbr")]
+        public double? Tbr { get; set; }
     }
 }

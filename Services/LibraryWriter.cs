@@ -7,11 +7,11 @@ using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Plugin.YouTubeFast.Configuration;
-using Jellyfin.Plugin.YouTubeFast.YouTube;
+using Jellyfin.Plugin.JellyTuber.Configuration;
+using Jellyfin.Plugin.JellyTuber.YouTube;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.YouTubeFast.Services;
+namespace Jellyfin.Plugin.JellyTuber.Services;
 
 /// <summary>
 /// Turns API results into a flat on-disk layout:

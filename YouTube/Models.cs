@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
-namespace Jellyfin.Plugin.YouTubeFast.YouTube;
+namespace Jellyfin.Plugin.JellyTuber.YouTube;
 
 /// <summary>A single video resolved from the API, normalised for our writer.</summary>
 public class YouTubeVideo

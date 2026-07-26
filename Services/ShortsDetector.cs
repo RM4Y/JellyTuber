@@ -8,7 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.YouTubeFast.Services;
+namespace Jellyfin.Plugin.JellyTuber.Services;
 
 /// <summary>
 /// Detects YouTube Shorts.
