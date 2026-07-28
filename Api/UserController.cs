@@ -44,6 +44,31 @@ public class UserController : ControllerBase
         Content = PageHtml.Html
     };
 
+    /// <summary>
+    /// Home-screen icon for the self-service page. iOS Safari's "Add to Home
+    /// Screen" specifically looks for an apple-touch-icon link (see the
+    /// &lt;link&gt; tag in <see cref="PageHtml"/>) rather than falling back to
+    /// the regular favicon - without one, iOS just screenshots the page
+    /// instead. Served as an actual cacheable file (not inlined as a data
+    /// URI like the favicon) since apple-touch-icon support for data URIs is
+    /// inconsistent across iOS versions, and inlining would otherwise add
+    /// ~55KB of duplicate base64 to every single page load.
+    /// </summary>
+    [HttpGet("JellyTuber/apple-touch-icon.png")]
+    [AllowAnonymous]
+    public ActionResult AppleTouchIcon()
+    {
+        var resourceName = $"{typeof(Plugin).Namespace}.Configuration.AppleTouchIcon.png";
+        var stream = typeof(Plugin).Assembly.GetManifestResourceStream(resourceName);
+        if (stream is null)
+        {
+            return NotFound();
+        }
+
+        Response.Headers.CacheControl = "public, max-age=2592000";
+        return File(stream, "image/png");
+    }
+
     [HttpPost("JellyTuber/User/Search")]
     [Authorize]
     public async Task<ActionResult> Search([FromBody] SearchRequest req)

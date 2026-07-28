@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,21 +16,24 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.JellyTuber.Api;
 
 /// <summary>
-/// Resolver + proxy endpoint. The .strm files point at Stream/{videoId}; when
-/// a client plays one, we ask yt-dlp for the real stream URL and then PROXY
-/// the bytes (rather than redirecting the client to it).
+/// Resolver endpoint. The .strm files point at Stream/{videoId}; when a
+/// client plays one, we ask yt-dlp for the real stream URL.
 ///
-/// This matters because googlevideo.com URLs are bound to the IP that
-/// resolved them - i.e. this server. A 302 redirect would hand that URL to
-/// whatever device is actually playing, which fails as soon as the player is
-/// on a different network/IP than the server (remote clients, mobile data,
-/// most "not on the same LAN" setups). Proxying keeps every request to
-/// YouTube's CDN originating from this server, so playback works the same
-/// for every client: the Jellyfin web player, iOS/Android apps, or any other
-/// Jellyfin-compatible player.
+/// googlevideo.com URLs are signed and IP-locked to whoever resolved them -
+/// i.e. this server. For a client reaching the internet through the same
+/// router as the server (the common case: same LAN/NAT, so the same public
+/// IP), a redirect straight to that URL works exactly as well as it did for
+/// this server and is far faster - no proxy overhead, no muxing, the client
+/// does its own adaptive bitrate. <see cref="LocalNetworkDetector"/> decides
+/// this per request by comparing the client's IP against the server's own
+/// public IP.
 ///
-/// When the resolved format is HLS, the playlist is rewritten so its segment
-/// URIs also route back through <see cref="Proxy"/> for the same reason.
+/// For a client on a genuinely different network (mobile data, another
+/// building - no VPN), that redirect would 403, so those requests fall back
+/// to PROXYING the bytes instead, keeping every request to YouTube's CDN
+/// originating from this server. When the resolved format is HLS, the
+/// playlist is rewritten so its segment URIs also route back through
+/// <see cref="Proxy"/> for the same reason.
 /// </summary>
 [ApiController]
 [Route("JellyTuber")]
@@ -64,7 +69,36 @@ public class PlaybackController : ControllerBase
     public async Task<ActionResult> Stream([FromRoute] string videoId, CancellationToken ct)
     {
         var resolver = new PlaybackResolver(_logger);
+
+        var clientIp = GetClientIp();
+        var isSameNetwork = await LocalNetworkDetector.IsSameNetworkAsync(_httpClientFactory, clientIp, _logger, ct).ConfigureAwait(false);
+        _logger.LogInformation(
+            "JellyTuber Stream {VideoId}: X-Forwarded-For={Xff}, RemoteIpAddress={RemoteIp}, resolved clientIp={ClientIp}, classified as {Classification}",
+            videoId,
+            Request.Headers.TryGetValue("X-Forwarded-For", out var xffHeader) ? xffHeader.ToString() : "(none)",
+            HttpContext.Connection.RemoteIpAddress,
+            clientIp,
+            isSameNetwork ? "SAME NETWORK (will try direct redirect first)" : "REMOTE (proxy pipeline only)");
+
+        if (isSameNetwork)
+        {
+            var directUrl = await resolver.ResolveDirectAsync(videoId, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(directUrl))
+            {
+                return Redirect(directUrl!);
+            }
+
+            // No HLS manifest for this video - the common case, since most
+            // regular (non-live) videos don't expose one. Fall through to
+            // the proxied DASH pipeline below: same-network clients still
+            // reach it faster than remote ones would (no extra network hop
+            // to get there), and it reaches full quality (up to MaxHeight)
+            // instead of the 360p a plain redirect would be stuck with.
+        }
+
+        var resolveSw = Stopwatch.StartNew();
         var resolved = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
+        _logger.LogInformation("yt-dlp resolve for {VideoId} took {ElapsedMs}ms (cache hit if this is near 0ms)", videoId, resolveSw.ElapsedMilliseconds);
 
         if (resolved is null)
         {
@@ -73,28 +107,47 @@ public class PlaybackController : ControllerBase
 
         if (resolved.VideoUrl is not null && resolved.AudioUrl is not null)
         {
-            var succeeded = await RelayMuxedAsync(resolved, ct).ConfigureAwait(false);
-
-            // YouTube's signed URLs can go bad (403) well before the window
-            // we cache them for - a seek minutes after the initial resolve
-            // can land on an already-dead URL, and without this it would
-            // keep failing the same way until the cache entry naturally
-            // expires (up to LinkCacheMinutes later). Drop the stale entry
-            // and retry once against a freshly resolved URL before giving
-            // up. Safe to retry: a failed attempt never got as far as
-            // writing response headers.
-            if (!succeeded && !Response.HasStarted && !ct.IsCancellationRequested)
+            if (resolved.DurationSeconds > 0 && resolved.IsTsCompatible)
             {
-                PlaybackResolver.Invalidate(videoId);
-                var fresh = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
+                // Known duration and an H.264+AAC source: hand out a
+                // playlist that re-segments this DASH source into
+                // independently time-addressable HLS segments (see Segment
+                // below) instead of one continuous muxed stream with
+                // byte-range-approximated seeking.
+                await WritePlaylistAsync(videoId, resolved, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                // Either no duration (can't build a fixed-length segment
+                // playlist) or a codec MPEG-TS can't carry (VP9/AV1 video,
+                // Opus audio - typically heights above 1080p, where YouTube
+                // doesn't offer H.264). Fall back to muxing the whole thing
+                // as one continuous stream; seeking on it is only
+                // approximate.
+                var succeeded = await RelayMuxedAsync(resolved, ct).ConfigureAwait(false);
 
-                if (fresh?.VideoUrl is not null && fresh.AudioUrl is not null)
+                // YouTube's signed URLs can go bad (403) well before the
+                // window we cache them for - a seek minutes after the
+                // initial resolve can land on an already-dead URL, and
+                // without this it would keep failing the same way until the
+                // cache entry naturally expires (up to LinkCacheMinutes
+                // later). Drop the stale entry and retry once against a
+                // freshly resolved URL before giving up. Safe to retry: a
+                // failed attempt never got as far as writing response
+                // headers.
+                if (!succeeded && !Response.HasStarted && !ct.IsCancellationRequested)
                 {
-                    await RelayMuxedAsync(fresh, ct).ConfigureAwait(false);
-                }
-                else if (fresh?.DirectUrl is not null)
-                {
-                    await RelayAsync(fresh.DirectUrl, ct).ConfigureAwait(false);
+                    PlaybackResolver.Invalidate(videoId);
+                    var fresh = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
+
+                    if (fresh?.VideoUrl is not null && fresh.AudioUrl is not null)
+                    {
+                        await RelayMuxedAsync(fresh, ct).ConfigureAwait(false);
+                    }
+                    else if (fresh?.DirectUrl is not null)
+                    {
+                        await RelayAsync(fresh.DirectUrl, ct).ConfigureAwait(false);
+                    }
                 }
             }
         }
@@ -110,8 +163,188 @@ public class PlaybackController : ControllerBase
         return new EmptyResult();
     }
 
+    /// <summary>
+    /// The scheme to use when building an absolute URL back to this plugin
+    /// (playlist segment URIs, proxy URIs). <see cref="HttpRequest.Scheme"/>
+    /// reflects what Kestrel itself received, which behind a reverse proxy
+    /// terminating TLS is "http" even though the public-facing request was
+    /// HTTPS - building URLs from that lands on the wrong port (80 instead
+    /// of 443) and fails outright rather than just being insecure. Prefer
+    /// the proxy's own X-Forwarded-Proto when present.
+    /// </summary>
+    private string GetExternalScheme()
+    {
+        if (Request.Headers.TryGetValue("X-Forwarded-Proto", out var proto) && proto.Count > 0)
+        {
+            var first = proto[0]?.Split(',')[0].Trim();
+            if (!string.IsNullOrEmpty(first))
+            {
+                return first;
+            }
+        }
+
+        return Request.Scheme;
+    }
+
+    /// <summary>
+    /// The requesting client's real IP, for <see cref="LocalNetworkDetector"/>.
+    /// Behind a reverse proxy, <see cref="ConnectionInfo.RemoteIpAddress"/> is
+    /// the proxy's own address, not the client's - X-Forwarded-For (set by
+    /// every standard reverse proxy) carries the real originating IP as its
+    /// first, leftmost entry.
+    /// </summary>
+    private IPAddress? GetClientIp()
+    {
+        if (Request.Headers.TryGetValue("X-Forwarded-For", out var forwardedFor) && forwardedFor.Count > 0)
+        {
+            var first = forwardedFor[0]?.Split(',')[0].Trim();
+            if (!string.IsNullOrEmpty(first) && IPAddress.TryParse(first, out var parsed))
+            {
+                return parsed;
+            }
+        }
+
+        return HttpContext.Connection.RemoteIpAddress;
+    }
+
+    /// <summary>
+    /// Writes the synthetic HLS playlist for a DASH source, referencing
+    /// <see cref="Segment"/> for each piece. Generated fresh per request (not
+    /// cached) since it's cheap to build and always reflects the current
+    /// resolved duration.
+    /// </summary>
+    private async Task WritePlaylistAsync(string videoId, ResolvedStream resolved, CancellationToken ct)
+    {
+        var segmentBaseUrl = $"{GetExternalScheme()}://{Request.Host}/JellyTuber/Segment/{videoId}/";
+        var playlist = OnDemandHlsPackager.BuildPlaylist(resolved.DurationSeconds, i => segmentBaseUrl + i.ToString(CultureInfo.InvariantCulture) + ".ts");
+
+        PrefetchFirstSegment(videoId, resolved);
+
+        Response.StatusCode = StatusCodes.Status200OK;
+        Response.ContentType = "application/vnd.apple.mpegurl";
+        await Response.WriteAsync(playlist, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Kicks off the HLS packaging session for segment 0 as soon as the
+    /// playlist is handed out, instead of waiting for the client's first
+    /// Segment request to trigger it. Shaves the round-trip of the client
+    /// fetching/parsing the playlist off the perceived startup latency,
+    /// since that time otherwise passes with ffmpeg not yet even started.
+    /// Fire-and-forget deliberately: this request's own CancellationToken
+    /// dies with the response, but the packaging session needs to keep
+    /// running for the Segment requests that follow it.
+    /// </summary>
+    private void PrefetchFirstSegment(string videoId, ResolvedStream resolved)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, 0, _logger, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Prefetch of first HLS segment failed for {VideoId} (non-fatal, the real request will just start the session itself)", videoId);
+            }
+        });
+    }
+
+    /// <summary>
+    /// GET /JellyTuber/Segment/{videoId}/{index}.ts
+    ///
+    /// Mux-and-serve one <see cref="OnDemandHlsPackager.SegmentSeconds"/>-long
+    /// slice of a DASH source, addressed purely by time (via
+    /// <paramref name="index"/>) rather than an approximated byte offset.
+    /// This is what makes seeking reliable: jumping anywhere in the video is
+    /// just a request for a different, independent segment URL, so there's
+    /// nothing to splice together and nothing for a player to misinterpret
+    /// as a broken continuation of a previous stream.
+    ///
+    /// The .ts suffix is required, not cosmetic: ffmpeg's own HLS demuxer
+    /// (which is what Jellyfin's server-side transcoder uses to read this
+    /// plugin's playlist when a client can't direct-play it) rejects segment
+    /// URLs whose extension isn't on its allowed_segment_extensions list.
+    /// </summary>
+    [HttpGet("Segment/{videoId}/{index:int}.ts")]
+    [AllowAnonymous]
+    public async Task<ActionResult> Segment([FromRoute] string videoId, [FromRoute] int index, CancellationToken ct)
+    {
+        if (index < 0)
+        {
+            return NotFound();
+        }
+
+        var resolver = new PlaybackResolver(_logger);
+        var resolved = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
+
+        if (resolved?.VideoUrl is null || resolved.AudioUrl is null)
+        {
+            return NotFound($"Could not resolve video {videoId}");
+        }
+
+        var path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, index, _logger, ct).ConfigureAwait(false);
+
+        // Same rationale as the retry in Stream(): a signed URL can go
+        // stale mid-playback well before its cache entry expires. Also
+        // covers a genuinely missing segment (e.g. an index past the end).
+        if (path is null && !ct.IsCancellationRequested)
+        {
+            PlaybackResolver.Invalidate(videoId);
+            HlsPackagerSessionManager.Invalidate(videoId);
+            var fresh = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
+
+            if (fresh?.VideoUrl is not null && fresh.AudioUrl is not null)
+            {
+                path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, fresh, index, _logger, ct).ConfigureAwait(false);
+            }
+        }
+
+        if (path is null)
+        {
+            return ct.IsCancellationRequested ? new EmptyResult() : NotFound();
+        }
+
+        FileStream fileStream;
+        try
+        {
+            fileStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        }
+        catch (IOException)
+        {
+            // Session was torn down (idle sweep/restart) between us learning
+            // the path and opening it - vanishingly rare given how recently
+            // it was written. Treat like any other missed segment.
+            return NotFound();
+        }
+
+        await using (fileStream.ConfigureAwait(false))
+        {
+            Response.ContentType = "video/mp2t";
+            Response.ContentLength = fileStream.Length;
+
+            try
+            {
+                await fileStream.CopyToAsync(Response.Body, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Client disconnected or seeked away mid-stream; not an error.
+            }
+        }
+
+        return new EmptyResult();
+    }
+
     /// <summary>How long to wait for ffmpeg to produce its first bytes before giving up on a seek target.</summary>
     private static readonly TimeSpan FirstByteTimeout = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// Requests for fewer bytes than this are treated as a capability/header
+    /// probe rather than real playback - see the comment in
+    /// <see cref="RelayMuxedAsync"/> for why that distinction matters.
+    /// </summary>
+    private const long ProbeRangeThresholdBytes = 1024;
 
     /// <summary>
     /// Muxes YouTube's separate video-only and audio-only DASH URLs into one
@@ -152,20 +385,53 @@ public class PlaybackController : ControllerBase
 
         double? seekSeconds = null;
         long start = 0;
+        long? explicitEnd = null;
         var isRangeRequest = false;
 
-        if (declaredTotal > 0
+        var hasRange = declaredTotal > 0
             && Request.Headers.TryGetValue("Range", out var rangeHeader)
             && rangeHeader.Count > 0
-            && TryParseRangeStart(rangeHeader.ToString(), out start)
-            && start > 0)
+            && TryParseRange(rangeHeader.ToString(), out start, out explicitEnd);
+
+        // Some clients send a tiny explicit range (classically "bytes=0-1")
+        // purely to sniff Range support / content type before issuing the
+        // real request for whatever position they actually want - no real
+        // player ever consumes video in chunks this small. Servicing one of
+        // these the normal way still pays the full cost of a seek (a fresh
+        // ffmpeg process and a new googlevideo connection) for bytes nobody
+        // reads. Short-circuit it with a synthetic body instead - this is
+        // pure response-shaping before any process is spawned, so it can't
+        // affect the actual mux path.
+        if (hasRange && explicitEnd is long endByte)
+        {
+            var probeStart = Math.Min(start, declaredTotal - 1);
+            var probeEnd = Math.Min(endByte, declaredTotal - 1);
+            var requestedLength = probeEnd - probeStart + 1;
+
+            if (requestedLength is > 0 and <= ProbeRangeThresholdBytes)
+            {
+                await WriteProbeResponseAsync(probeStart, probeEnd, declaredTotal, ct).ConfigureAwait(false);
+                return true;
+            }
+        }
+
+        if (hasRange && start > 0)
         {
             start = Math.Min(start, declaredTotal - 1);
             isRangeRequest = true;
 
-            if (resolved.DurationSeconds > 0 && total > 0)
+            if (resolved.DurationSeconds > 0 && declaredTotal > 0)
             {
-                var target = resolved.DurationSeconds * ((double)start / total);
+                // Invert using declaredTotal, not total: declaredTotal (the
+                // padded value) is what we handed the client as
+                // Content-Length, so it's also what the client used to turn
+                // its desired seek TIME into the byte offset it sent us.
+                // Inverting with the unpadded total instead would recover a
+                // time systematically ~3% later than intended - a small
+                // absolute error early in the video that grows the deeper
+                // the jump, e.g. landing over a minute past a seek target
+                // near the end of a long video.
+                var target = resolved.DurationSeconds * ((double)start / declaredTotal);
 
                 // Leave a couple of seconds of headroom so an estimate that
                 // lands right on (or past) the real end still resolves to
@@ -323,6 +589,26 @@ public class PlaybackController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Answers a tiny probe range with a synthetic zero-filled body of
+    /// exactly the requested length, matching the headers a real request for
+    /// the same range would get - without spawning ffmpeg or touching
+    /// googlevideo at all.
+    /// </summary>
+    private async Task WriteProbeResponseAsync(long start, long end, long declaredTotal, CancellationToken ct)
+    {
+        var length = end - start + 1;
+
+        Response.ContentType = "video/x-matroska";
+        Response.Headers["Accept-Ranges"] = "bytes";
+        Response.StatusCode = StatusCodes.Status206PartialContent;
+        Response.Headers["Content-Range"] = $"bytes {start}-{end}/{declaredTotal}";
+        Response.ContentLength = length;
+
+        var body = new byte[length];
+        await Response.Body.WriteAsync(body, ct).ConfigureAwait(false);
+    }
+
     private static async Task<int> ReadWithTimeoutAsync(Stream stream, byte[] buffer, TimeSpan timeout, CancellationToken ct)
     {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -363,9 +649,11 @@ public class PlaybackController : ControllerBase
         }
     }
 
-    private static bool TryParseRangeStart(string? rangeHeader, out long start)
+    private static bool TryParseRange(string? rangeHeader, out long start, out long? end)
     {
         start = 0;
+        end = null;
+
         if (string.IsNullOrEmpty(rangeHeader) || !rangeHeader.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
         {
             return false;
@@ -373,7 +661,18 @@ public class PlaybackController : ControllerBase
 
         var spec = rangeHeader.Substring("bytes=".Length).Split(',')[0].Trim();
         var dash = spec.IndexOf('-');
-        return dash > 0 && long.TryParse(spec.AsSpan(0, dash), out start);
+        if (dash <= 0 || !long.TryParse(spec.AsSpan(0, dash), out start))
+        {
+            return false;
+        }
+
+        var endSpan = spec.AsSpan(dash + 1);
+        if (endSpan.Length > 0 && long.TryParse(endSpan, out var parsedEnd))
+        {
+            end = parsedEnd;
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -438,7 +737,7 @@ public class PlaybackController : ControllerBase
             if (isPlaylist)
             {
                 var text = await upstream.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                var proxyBase = $"{Request.Scheme}://{Request.Host}/JellyTuber/Proxy?u=";
+                var proxyBase = $"{GetExternalScheme()}://{Request.Host}/JellyTuber/Proxy?u=";
                 var rewritten = HlsPlaylistRewriter.Rewrite(
                     text,
                     new Uri(url),

@@ -3,3 +3,8 @@ obj/
 publish/
 stage/
 *.zip
+
+# Untracked reference copy of the old YouTubeFast plugin, kept locally for
+# comparison only - excluded from the build (see the .csproj) and never
+# meant to be published.
+3.5/

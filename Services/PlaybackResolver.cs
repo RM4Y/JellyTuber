@@ -30,6 +30,27 @@ public sealed class ResolvedStream
 
     public string? AudioUrl { get; init; }
 
+    /// <summary>Video codec of <see cref="VideoUrl"/> (e.g. "avc1.640028"), null if not applicable.</summary>
+    public string? VideoCodec { get; init; }
+
+    /// <summary>Audio codec of <see cref="AudioUrl"/> (e.g. "mp4a.40.2"), null if not applicable.</summary>
+    public string? AudioCodec { get; init; }
+
+    /// <summary>Height in pixels of <see cref="VideoUrl"/>, 0 if unknown. Used to pick a sane bitrate ceiling when re-encoding for <see cref="HlsPackagerSessionManager"/>.</summary>
+    public int Height { get; init; }
+
+    /// <summary>
+    /// True when <see cref="VideoCodec"/>/<see cref="AudioCodec"/> are safe
+    /// to stream-copy into MPEG-TS (H.264 + AAC) for
+    /// <see cref="HlsPackagerSessionManager"/>-driven segmented playback.
+    /// YouTube's higher-efficiency codecs (VP9/AV1 video, Opus audio) aren't
+    /// reliably supported inside MPEG-TS, so those fall back to the
+    /// continuous single-stream mux instead.
+    /// </summary>
+    public bool IsTsCompatible =>
+        VideoCodec is not null && VideoCodec.StartsWith("avc1", StringComparison.OrdinalIgnoreCase)
+        && AudioCodec is not null && AudioCodec.StartsWith("mp4a", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Video duration in seconds, 0 if unknown. Used to approximate seek offsets.</summary>
     public double DurationSeconds { get; init; }
 
@@ -44,6 +65,8 @@ public sealed class ResolvedStream
 public class PlaybackResolver
 {
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new();
+
+    private static readonly ConcurrentDictionary<string, CacheEntry<string>> DirectCache = new();
 
     /// <summary>Once the cache grows past this many entries, expired ones are swept out.</summary>
     private const int CacheSweepThreshold = 500;
@@ -91,6 +114,132 @@ public class PlaybackResolver
     public static void Invalidate(string videoId)
     {
         Cache.TryRemove(videoId, out _);
+        DirectCache.TryRemove(videoId, out _);
+    }
+
+    /// <summary>
+    /// Resolves straight to the HLS master manifest URL, the fast path the
+    /// old YouTubeFast plugin always used: the client does its own adaptive
+    /// bitrate against it (up to 1080p60), no muxing or proxying involved at
+    /// all. The caller 302-redirects the client straight to the result.
+    ///
+    /// Deliberately narrower than YouTubeFast's own fallback chain: that one
+    /// also tried a single combined premuxed URL when no HLS manifest
+    /// existed, but the only such format YouTube reliably offers is itag 18
+    /// (360p) - a real quality regression from what the DASH+proxy pipeline
+    /// can reach (up to MaxHeight, including 4K). Returning null here instead
+    /// lets the caller fall through to that pipeline, which is what most
+    /// videos hit anyway since combined HLS is the exception, not the rule.
+    ///
+    /// Only safe when the requesting client will reach googlevideo from the
+    /// same IP that resolved the URL here (see
+    /// <see cref="LocalNetworkDetector"/>) - these signed URLs are IP-locked,
+    /// so a client on a different network gets a 403 following the redirect.
+    /// </summary>
+    public async Task<string?> ResolveDirectAsync(string videoId, CancellationToken ct)
+    {
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+
+        if (DirectCache.TryGetValue(videoId, out var cached) && cached.ExpiresUtc > DateTime.UtcNow)
+        {
+            return cached.Value;
+        }
+
+        var url = await RunYtDlpDirectAsync(config, videoId, ct).ConfigureAwait(false);
+
+        if (!string.IsNullOrEmpty(url))
+        {
+            DirectCache[videoId] = new CacheEntry<string>
+            {
+                Value = url!,
+                ExpiresUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, config.LinkCacheMinutes))
+            };
+        }
+
+        return url;
+    }
+
+    private async Task<string?> RunYtDlpDirectAsync(PluginConfiguration config, string videoId, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = config.YtDlpPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        // Select an HLS format, then print ITS master manifest URL (shared by
+        // all variants) rather than a single variant. The client then does
+        // adaptive bitrate up to the best H.264 variant on its own.
+        psi.ArgumentList.Add("--print");
+        psi.ArgumentList.Add("%(manifest_url)s");
+        psi.ArgumentList.Add("-f");
+        psi.ArgumentList.Add("b[protocol^=m3u8]/bv*[protocol^=m3u8]");
+
+        psi.ArgumentList.Add("--no-playlist");
+        psi.ArgumentList.Add("--no-warnings");
+        psi.ArgumentList.Add("--socket-timeout");
+        psi.ArgumentList.Add("15");
+
+        try
+        {
+            var cacheDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "jellyfin-ytdlp-cache");
+            System.IO.Directory.CreateDirectory(cacheDir);
+            psi.ArgumentList.Add("--cache-dir");
+            psi.ArgumentList.Add(cacheDir);
+        }
+        catch
+        {
+            // ignore - fall back to yt-dlp's default cache location
+        }
+
+        if (!string.IsNullOrWhiteSpace(config.YtDlpExtraArgs))
+        {
+            foreach (var arg in config.YtDlpExtraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                psi.ArgumentList.Add(arg);
+            }
+        }
+
+        psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
+
+        try
+        {
+            using var process = new Process { StartInfo = psi };
+            process.Start();
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+            var stderrTask = process.StandardError.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct).ConfigureAwait(false);
+
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
+
+            if (process.ExitCode != 0)
+            {
+                _logger.LogWarning("yt-dlp (HLS manifest) failed for {VideoId}: {Error}", videoId, stderr.Trim());
+                return null;
+            }
+
+            // First non-empty http(s) line is the playable URL / manifest.
+            foreach (var line in stdout.Split('\n'))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                {
+                    return trimmed;
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to launch yt-dlp at '{Path}'", config.YtDlpPath);
+            return null;
+        }
     }
 
     private static void SweepExpiredIfLarge()
@@ -234,6 +383,9 @@ public class PlaybackResolver
                 {
                     VideoUrl = video.Url,
                     AudioUrl = audio.Url,
+                    VideoCodec = video.Vcodec,
+                    AudioCodec = audio.Acodec,
+                    Height = video.Height ?? 0,
                     DurationSeconds = duration,
                     EstimatedBytes = bytes
                 };
@@ -276,22 +428,28 @@ public class PlaybackResolver
     }
 
     /// <summary>
-    /// Builds a yt-dlp format selector honouring MaxHeight. YouTube only
-    /// publishes H.264 up to 1080p60; above that, VP9/AV1 are the only
-    /// codecs it exposes at all (1440p/2160p), so a hard preference for H.264
-    /// would silently cap 1440p/2160p requests back down to 1080p. Below
-    /// 1080p we still prefer H.264+AAC for maximum client compatibility; at
-    /// or above 1080p we take the best available codec so higher heights are
-    /// actually reachable.
+    /// Builds a yt-dlp format selector honouring MaxHeight.
     ///
-    /// Deliberately NOT forcing AAC audio at every height (which would let
-    /// Jellyfin Direct Play instead of wrapping our stream in its own
-    /// transcode): Jellyfin's own ffmpeg verifies the real timestamp it
-    /// lands on after an input seek and corrects for it, but a raw client
-    /// player doing Direct Play has no such correction - it just trusts our
-    /// approximate byte-offset-to-time math outright. That traded a slower
-    /// but correct seek for a faster one that could land in the wrong place
-    /// entirely (or find nothing there). Slower-but-correct wins.
+    /// A combined HLS format (video+audio already muxed by YouTube) is tried
+    /// FIRST, in case a given video happens to expose one - that resolves to
+    /// <see cref="ResolvedStream.DirectUrl"/> instead of separate
+    /// <see cref="ResolvedStream.VideoUrl"/>/<see cref="ResolvedStream.AudioUrl"/>,
+    /// letting <see cref="Api.PlaybackController"/> take its plain proxy
+    /// relay path with no ffmpeg involved at all. In practice regular
+    /// (non-live) YouTube videos essentially never expose this, so this is
+    /// a cheap opportunistic check, not something to rely on.
+    ///
+    /// Separate DASH video+audio (needing ffmpeg muxing) is the format
+    /// actually used for the overwhelming majority of videos, and strongly
+    /// prefers H.264 video + AAC audio at every height: that's the only
+    /// combination <see cref="HlsPackagerSessionManager"/> can safely
+    /// stream-copy into MPEG-TS for segmented playback (VP9/AV1 video and
+    /// Opus audio aren't reliably supported inside MPEG-TS). YouTube only
+    /// publishes H.264 up to 1080p60 - above that, VP9/AV1 are the only
+    /// codecs it exposes at all - so heights above 1080p fall back to
+    /// whatever codec is available; <see cref="ResolvedStream.IsTsCompatible"/>
+    /// then routes those to the older continuous single-stream mux instead
+    /// (approximate seeking, but broad codec support).
     ///
     /// A premuxed single format is kept as a last resort. Honours the
     /// user's manual override.
@@ -306,19 +464,25 @@ public class PlaybackResolver
         var h = config.MaxHeight > 0 ? config.MaxHeight : 1080;
         var hh = h.ToString(CultureInfo.InvariantCulture);
 
-        if (h < 1080)
-        {
-            return $"bv*[vcodec^=avc1][height<=?{hh}]+ba[acodec^=mp4a]/" +
-                   $"bv*[height<=?{hh}]+ba/" +
-                   $"b[height<=?{hh}]/best";
-        }
+        var hls = $"b[protocol^=m3u8][vcodec^=avc1][height<=?{hh}]/b[protocol^=m3u8][height<=?{hh}]/";
 
-        return $"bv*[height<=?{hh}]+ba/b[height<=?{hh}]/best";
+        return hls +
+               $"bv*[vcodec^=avc1][height<=?{hh}]+ba[acodec^=mp4a]/" +
+               $"bv*[vcodec^=avc1][height<=?{hh}]+ba/" +
+               $"bv*[height<=?{hh}]+ba/" +
+               $"b[height<=?{hh}]/best";
     }
 
     private sealed class CacheEntry
     {
         public ResolvedStream Stream { get; set; } = null!;
+
+        public DateTime ExpiresUtc { get; set; }
+    }
+
+    private sealed class CacheEntry<T>
+    {
+        public T Value { get; set; } = default!;
 
         public DateTime ExpiresUtc { get; set; }
     }
@@ -342,6 +506,9 @@ public class PlaybackResolver
 
         [JsonPropertyName("acodec")]
         public string? Acodec { get; set; }
+
+        [JsonPropertyName("height")]
+        public int? Height { get; set; }
 
         [JsonPropertyName("filesize")]
         public double? Filesize { get; set; }

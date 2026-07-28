@@ -27,6 +27,15 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Configuration\configPage.html" />
+    <EmbeddedResource Include="Configuration\AppleTouchIcon.png" />
+  </ItemGroup>
+
+  <!-- "3.5" is a reference copy of the old YouTubeFast plugin kept for
+       comparison, not part of this project - exclude it from the build. -->
+  <ItemGroup>
+    <Compile Remove="3.5\**" />
+    <EmbeddedResource Remove="3.5\**" />
+    <None Remove="3.5\**" />
   </ItemGroup>
 
 </Project>
