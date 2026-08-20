@@ -18,7 +18,9 @@
                 </div>
                 <p class="fieldDescription">
                     Fast indexing via the YouTube Data API v3. Playback is resolved on demand with yt-dlp;
-                    Jellyfin handles transcoding and hardware acceleration.
+                    Jellyfin handles transcoding and hardware acceleration. yt-dlp and the Deno JS runtime
+                    it needs for YouTube's n-challenge are both downloaded and kept up to date by the
+                    plugin itself - nothing to install or point at manually.
                 </p>
 
                 <div class="inputContainer">
@@ -47,11 +49,6 @@
                     <div class="fieldDescription">Address devices use to reach this server (written into .strm files). Use the LAN IP, not localhost.</div>
                 </div>
 
-                <div class="inputContainer">
-                    <label class="inputLabel inputLabelUnfocused" for="YtDlpPath">yt-dlp path</label>
-                    <input id="YtDlpPath" name="YtDlpPath" type="text" is="emby-input" />
-                </div>
-
                 <h3>Quality</h3>
 
                 <div class="selectContainer">
@@ -74,16 +71,10 @@
                 <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="YtDlpExtraArgs">yt-dlp extra args (advanced)</label>
                     <input id="YtDlpExtraArgs" name="YtDlpExtraArgs" type="text" is="emby-input" />
-                    <div class="fieldDescription">Passed to every yt-dlp call. Default: <code>--js-runtimes deno:/usr/bin/deno</code> (Deno is required for YouTube's n-challenge so 1080p+ formats resolve). Adjust the deno path to match your container.</div>
+                    <div class="fieldDescription">Passed to every yt-dlp call, on top of the bundled Deno runtime the plugin already wires in automatically. Leave empty unless you need to tweak something specific.</div>
                 </div>
 
                 <h3>Indexing</h3>
-
-                <div class="inputContainer">
-                    <label class="inputLabel inputLabelUnfocused" for="KeepDays">Keep videos from the last (days)</label>
-                    <input id="KeepDays" name="KeepDays" type="number" min="0" is="emby-input" />
-                    <div class="fieldDescription">0 = keep everything. Lower = faster syncs, less quota.</div>
-                </div>
 
                 <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="LinkCacheMinutes">Remember playback links for (minutes)</label>
@@ -112,7 +103,8 @@
 
                 <h3>Sources</h3>
                 <p class="fieldDescription">
-                    Les chaînes se gèrent désormais depuis la page utilisateur.<br/>
+                    Les chaînes se gèrent désormais depuis la page utilisateur (y compris le nombre de
+                    dernières vidéos à conserver, réglable de 10 à 50 par chaîne).<br/>
                     Rendez-vous sur <code>http(s)://mon-url.domaine/JellyTuber</code>
                 </p>
 
@@ -173,14 +165,10 @@
                 document.querySelector("#ApiKey").value = config.ApiKey || "";
                 document.querySelector("#LibraryFolder").value = config.LibraryFolder || "";
                 document.querySelector("#JellyfinAddress").value = config.JellyfinAddress || "";
-                document.querySelector("#YtDlpPath").value = config.YtDlpPath || "yt-dlp";
                 document.querySelector("#MaxHeight").value = String(config.MaxHeight || 1080);
                 document.querySelector("#AutoCreateUserLibraries").checked = config.AutoCreateUserLibraries !== false;
                 document.querySelector("#YtDlpFormatOverride").value = config.YtDlpFormatOverride || "";
-                var defaultYtDlpArgs = "--js-runtimes deno:/usr/bin/deno";
-                document.querySelector("#YtDlpExtraArgs").value =
-                    (config.YtDlpExtraArgs == null || config.YtDlpExtraArgs === "") ? defaultYtDlpArgs : config.YtDlpExtraArgs;
-                document.querySelector("#KeepDays").value = config.KeepDays != null ? config.KeepDays : 60;
+                document.querySelector("#YtDlpExtraArgs").value = config.YtDlpExtraArgs || "";
                 document.querySelector("#LinkCacheMinutes").value = config.LinkCacheMinutes != null ? config.LinkCacheMinutes : 300;
                 document.querySelector("#FetchVideoDetails").checked = !!config.FetchVideoDetails;
                 document.querySelector("#ShortsMaxProbeSeconds").value = config.ShortsMaxProbeSeconds != null ? config.ShortsMaxProbeSeconds : 180;
@@ -196,12 +184,10 @@
                 config.ApiKey = document.querySelector("#ApiKey").value;
                 config.LibraryFolder = document.querySelector("#LibraryFolder").value;
                 config.JellyfinAddress = document.querySelector("#JellyfinAddress").value;
-                config.YtDlpPath = document.querySelector("#YtDlpPath").value;
                 config.MaxHeight = parseInt(document.querySelector("#MaxHeight").value, 10) || 1080;
                 config.AutoCreateUserLibraries = document.querySelector("#AutoCreateUserLibraries").checked;
                 config.YtDlpFormatOverride = document.querySelector("#YtDlpFormatOverride").value;
                 config.YtDlpExtraArgs = document.querySelector("#YtDlpExtraArgs").value;
-                config.KeepDays = parseInt(document.querySelector("#KeepDays").value, 10) || 0;
                 config.LinkCacheMinutes = parseInt(document.querySelector("#LinkCacheMinutes").value, 10) || 300;
                 config.FetchVideoDetails = document.querySelector("#FetchVideoDetails").checked;
                 config.ShortsMaxProbeSeconds = parseInt(document.querySelector("#ShortsMaxProbeSeconds").value, 10) || 180;

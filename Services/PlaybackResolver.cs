@@ -3,8 +3,10 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.JellyTuber.Configuration;
@@ -66,15 +68,17 @@ public class PlaybackResolver
 {
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new();
 
-    private static readonly ConcurrentDictionary<string, CacheEntry<string>> DirectCache = new();
+    private static readonly ConcurrentDictionary<string, CacheEntry<string?>> DirectCache = new();
 
     /// <summary>Once the cache grows past this many entries, expired ones are swept out.</summary>
     private const int CacheSweepThreshold = 500;
 
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger _logger;
 
-    public PlaybackResolver(ILogger logger)
+    public PlaybackResolver(IHttpClientFactory httpClientFactory, ILogger logger)
     {
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -147,23 +151,34 @@ public class PlaybackResolver
 
         var url = await RunYtDlpDirectAsync(config, videoId, ct).ConfigureAwait(false);
 
-        if (!string.IsNullOrEmpty(url))
+        // Cache a negative result too, not just a successful one: most
+        // videos have no combined HLS manifest at all (that's the common
+        // case, not the exception - see BuildFormat's doc comment), and
+        // without this every SAME-NETWORK play of such a video re-paid this
+        // ~2s yt-dlp manifest probe forever, on every single play, never
+        // just once. A `null` cache hit means "confirmed no manifest," and
+        // is returned exactly like a fresh negative result would be.
+        DirectCache[videoId] = new CacheEntry<string?>
         {
-            DirectCache[videoId] = new CacheEntry<string>
-            {
-                Value = url!,
-                ExpiresUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, config.LinkCacheMinutes))
-            };
-        }
+            Value = url,
+            ExpiresUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, config.LinkCacheMinutes))
+        };
 
         return url;
     }
 
     private async Task<string?> RunYtDlpDirectAsync(PluginConfiguration config, string videoId, CancellationToken ct)
     {
+        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
+        if (ytDlpPath is null)
+        {
+            _logger.LogError("yt-dlp is not available (download failed); cannot resolve {VideoId}", videoId);
+            return null;
+        }
+
         var psi = new ProcessStartInfo
         {
-            FileName = config.YtDlpPath,
+            FileName = ytDlpPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -195,12 +210,16 @@ public class PlaybackResolver
             // ignore - fall back to yt-dlp's default cache location
         }
 
-        if (!string.IsNullOrWhiteSpace(config.YtDlpExtraArgs))
+        var denoPath = await ExternalTools.EnsureDenoAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
+        if (denoPath is not null)
         {
-            foreach (var arg in config.YtDlpExtraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            {
-                psi.ArgumentList.Add(arg);
-            }
+            psi.ArgumentList.Add("--js-runtimes");
+            psi.ArgumentList.Add($"deno:{denoPath}");
+        }
+
+        foreach (var arg in ExternalTools.StripJsRuntimesArg(config.YtDlpExtraArgs))
+        {
+            psi.ArgumentList.Add(arg);
         }
 
         psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
@@ -224,21 +243,98 @@ public class PlaybackResolver
             }
 
             // First non-empty http(s) line is the playable URL / manifest.
+            string? manifestUrl = null;
             foreach (var line in stdout.Split('\n'))
             {
                 var trimmed = line.Trim();
                 if (trimmed.StartsWith("http", StringComparison.OrdinalIgnoreCase))
                 {
-                    return trimmed;
+                    manifestUrl = trimmed;
+                    break;
                 }
             }
 
-            return null;
+            if (manifestUrl is null)
+            {
+                return null;
+            }
+
+            if (await HasAmbiguousAudioLanguageAsync(manifestUrl, videoId, ct).ConfigureAwait(false))
+            {
+                // Multiple audio languages (e.g. an auto-dub) with no track
+                // marked DEFAULT=YES - which one plays is then entirely up to
+                // the player's own tie-break (often just "whichever is listed
+                // first"), and that's frequently the dub, not the original.
+                // We can't rewrite this manifest ourselves since the caller
+                // redirects the client straight to it without passing back
+                // through us - falling back to the DASH pipeline instead,
+                // whose format selector (see BuildFormat) reliably honours
+                // yt-dlp's own original-vs-dub language_preference.
+                _logger.LogInformation(
+                    "Skipping direct HLS redirect for {VideoId}: manifest exposes multiple audio languages with no explicit default (would let the player pick, e.g. a dub instead of the original) - falling back to the DASH pipeline",
+                    videoId);
+                return null;
+            }
+
+            return manifestUrl;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to launch yt-dlp at '{Path}'", config.YtDlpPath);
+            _logger.LogError(ex, "Failed to launch yt-dlp at '{Path}'", ytDlpPath);
             return null;
+        }
+    }
+
+    private static readonly Regex AudioLanguageRegex = new("LANGUAGE=\"([^\"]+)\"", RegexOptions.Compiled);
+
+    /// <summary>
+    /// True if <paramref name="manifestUrl"/>'s HLS master playlist lists more
+    /// than one audio language (via <c>#EXT-X-MEDIA:TYPE=AUDIO</c>) and none
+    /// of them is marked <c>DEFAULT=YES</c> - the ambiguous case a real-world
+    /// video with an auto-dub track produces (confirmed against a live
+    /// manifest: the dub and the original both come back as
+    /// <c>DEFAULT=NO,AUTOSELECT=YES</c>). On any fetch/parse failure, assumes
+    /// unambiguous so a network hiccup here can't block the fast path.
+    /// </summary>
+    private async Task<bool> HasAmbiguousAudioLanguageAsync(string manifestUrl, string videoId, CancellationToken ct)
+    {
+        try
+        {
+            using var http = _httpClientFactory.CreateClient();
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+
+            var text = await http.GetStringAsync(manifestUrl, timeoutCts.Token).ConfigureAwait(false);
+
+            var languages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var anyDefaultYes = false;
+
+            foreach (var line in text.Split('\n'))
+            {
+                if (line.IndexOf("EXT-X-MEDIA", StringComparison.Ordinal) < 0
+                    || line.IndexOf("TYPE=AUDIO", StringComparison.Ordinal) < 0)
+                {
+                    continue;
+                }
+
+                var langMatch = AudioLanguageRegex.Match(line);
+                if (langMatch.Success)
+                {
+                    languages.Add(langMatch.Groups[1].Value);
+                }
+
+                if (line.Contains("DEFAULT=YES", StringComparison.Ordinal))
+                {
+                    anyDefaultYes = true;
+                }
+            }
+
+            return languages.Count > 1 && !anyDefaultYes;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not inspect HLS manifest audio tracks for {VideoId}; using it as-is", videoId);
+            return false;
         }
     }
 
@@ -261,9 +357,16 @@ public class PlaybackResolver
 
     private async Task<ResolvedStream?> RunYtDlpAsync(PluginConfiguration config, string videoId, CancellationToken ct)
     {
+        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
+        if (ytDlpPath is null)
+        {
+            _logger.LogError("yt-dlp is not available (download failed); cannot resolve {VideoId}", videoId);
+            return null;
+        }
+
         var psi = new ProcessStartInfo
         {
-            FileName = config.YtDlpPath,
+            FileName = ytDlpPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -304,13 +407,17 @@ public class PlaybackResolver
             // ignore - fall back to yt-dlp's default cache location
         }
 
-        // Any advanced extra args the user configured.
-        if (!string.IsNullOrWhiteSpace(config.YtDlpExtraArgs))
+        var denoPath = await ExternalTools.EnsureDenoAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
+        if (denoPath is not null)
         {
-            foreach (var arg in config.YtDlpExtraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            {
-                psi.ArgumentList.Add(arg);
-            }
+            psi.ArgumentList.Add("--js-runtimes");
+            psi.ArgumentList.Add($"deno:{denoPath}");
+        }
+
+        // Any advanced extra args the user configured.
+        foreach (var arg in ExternalTools.StripJsRuntimesArg(config.YtDlpExtraArgs))
+        {
+            psi.ArgumentList.Add(arg);
         }
 
         psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
@@ -337,7 +444,7 @@ public class PlaybackResolver
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to launch yt-dlp at '{Path}'", config.YtDlpPath);
+            _logger.LogError(ex, "Failed to launch yt-dlp at '{Path}'", ytDlpPath);
             return null;
         }
     }

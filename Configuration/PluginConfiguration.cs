@@ -33,6 +33,13 @@ public class SourceItem
     /// access restricted per user).
     /// </summary>
     public string DestinationFolder { get; set; } = string.Empty;
+
+    /// <summary>
+    /// How many of the most recent videos to keep in the library for this
+    /// channel/playlist. Clamped to 10-50 at sync time. Older videos beyond
+    /// this count are pruned from disk.
+    /// </summary>
+    public int MaxVideos { get; set; } = 25;
 }
 
 /// <summary>
@@ -51,12 +58,6 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Written into the .strm files so clients know where to resolve streams.
     /// </summary>
     public string JellyfinAddress { get; set; } = "http://localhost:8096";
-
-    /// <summary>Path to the yt-dlp binary (used only at playback time).</summary>
-    public string YtDlpPath { get; set; } = "yt-dlp";
-
-    /// <summary>Only keep videos published within this many days (0 = keep everything).</summary>
-    public int KeepDays { get; set; } = 60;
 
     /// <summary>
     /// Maximum number of channels returned by the self-service search box.
@@ -102,11 +103,13 @@ public class PluginConfiguration : BasePluginConfiguration
     public string YtDlpFormatOverride { get; set; } = string.Empty;
 
     /// <summary>
-    /// Extra yt-dlp arguments (advanced), space-separated. Default wires up
-    /// the Deno JS runtime, needed for YouTube's n-challenge so 1080p+
-    /// formats resolve at all. Adjust the deno path if yours differs.
+    /// Extra yt-dlp arguments (advanced), space-separated. yt-dlp and Deno
+    /// are both bundled and self-managed by the plugin - no path setup
+    /// needed - and the Deno JS runtime flag (required for YouTube's
+    /// n-challenge so 1080p+ formats resolve) is wired in automatically.
+    /// This field is only for further optional tweaks.
     /// </summary>
-    public string YtDlpExtraArgs { get; set; } = "--js-runtimes deno:/usr/bin/deno";
+    public string YtDlpExtraArgs { get; set; } = string.Empty;
 
     /// <summary>The channels / playlists to sync.</summary>
     public List<SourceItem> Sources { get; set; } = new();
@@ -136,6 +139,12 @@ public class UserChannel
 
     /// <summary>Channel avatar URL, shown on the self-service page.</summary>
     public string Thumbnail { get; set; } = string.Empty;
+
+    /// <summary>
+    /// How many of the most recent videos to keep in the library for this
+    /// channel. User-editable on the self-service page, clamped to 10-50.
+    /// </summary>
+    public int MaxVideos { get; set; } = 25;
 }
 
 /// <summary>A single video a Jellyfin user added by URL via the self-service page.</summary>

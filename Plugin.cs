@@ -19,6 +19,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         : base(applicationPaths, xmlSerializer)
     {
         Instance = this;
+        MigrateLegacyYtDlpSettings();
     }
 
     public override string Name => "JellyTuber";
@@ -41,6 +42,28 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
     /// <summary>Persist the current configuration (callable from controllers).</summary>
     public void Save() => SaveConfiguration();
+
+    /// <summary>
+    /// Older versions of this plugin required manually setting a yt-dlp
+    /// binary path and a <c>--js-runtimes deno:&lt;path&gt;</c> flag; both
+    /// yt-dlp and Deno are now downloaded and managed automatically (see
+    /// <see cref="Services.ExternalTools"/>). A config saved by an older
+    /// version can still have that flag sitting in
+    /// <see cref="PluginConfiguration.YtDlpExtraArgs"/> - strip it out once
+    /// so the settings page reflects that nothing manual is needed anymore,
+    /// and so it can never shadow the path this plugin resolves itself.
+    /// </summary>
+    private void MigrateLegacyYtDlpSettings()
+    {
+        var args = Configuration.YtDlpExtraArgs;
+        if (string.IsNullOrEmpty(args) || !args.Contains("--js-runtimes", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Configuration.YtDlpExtraArgs = string.Join(' ', Services.ExternalTools.StripJsRuntimesArg(args));
+        SaveConfiguration();
+    }
 
     public IEnumerable<PluginPageInfo> GetPages()
     {

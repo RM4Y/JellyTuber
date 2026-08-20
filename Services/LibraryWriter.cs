@@ -343,45 +343,63 @@ public class LibraryWriter
     }
 
     /// <summary>
-    /// Deletes video folders whose stored publish date is older than the cutoff.
-    /// Walks the source root recursively looking for .ytmeta markers.
+    /// Keeps only the <paramref name="maxVideos"/> most recently published
+    /// video folders under <paramref name="sourceRoot"/>, deleting the rest.
+    /// Walks the source root recursively looking for .ytmeta markers. This is
+    /// what enforces each channel's "keep the last N videos" setting, both
+    /// pruning videos that aged out of the window and shrinking the library
+    /// down when a user/admin lowers the count.
     /// </summary>
-    public void CleanupOldVideos(string sourceRoot, DateTime cutoffUtc)
+    public void CleanupExcessVideos(string sourceRoot, int maxVideos)
     {
-        if (!Directory.Exists(sourceRoot))
+        if (maxVideos <= 0 || !Directory.Exists(sourceRoot))
         {
             return;
         }
+
+        var entries = new List<(string Dir, DateTime Published)>();
 
         foreach (var marker in Directory.EnumerateFiles(sourceRoot, VideoMarker, SearchOption.AllDirectories))
         {
             try
             {
-                var content = File.ReadAllText(marker);
-                var parts = content.Split('|');
-                if (parts.Length < 2)
+                var parts = File.ReadAllText(marker).Split('|');
+                var dir = Path.GetDirectoryName(marker);
+                if (dir is null || parts.Length < 2)
                 {
                     continue;
                 }
 
-                if (DateTime.TryParse(
+                if (!DateTime.TryParse(
                         parts[1],
                         CultureInfo.InvariantCulture,
                         DateTimeStyles.RoundtripKind,
-                        out var published)
-                    && published < cutoffUtc)
+                        out var published))
                 {
-                    var dir = Path.GetDirectoryName(marker);
-                    if (dir is not null && Directory.Exists(dir))
-                    {
-                        Directory.Delete(dir, recursive: true);
-                        _logger.LogInformation("Removed expired video folder: {Dir}", dir);
-                    }
+                    continue;
+                }
+
+                entries.Add((dir, published));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Cleanup failed reading marker {Marker}", marker);
+            }
+        }
+
+        foreach (var (dir, _) in entries.OrderByDescending(e => e.Published).Skip(maxVideos))
+        {
+            try
+            {
+                if (Directory.Exists(dir))
+                {
+                    Directory.Delete(dir, recursive: true);
+                    _logger.LogInformation("Removed video folder beyond the {Max}-video limit: {Dir}", maxVideos, dir);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Cleanup failed for marker {Marker}", marker);
+                _logger.LogWarning(ex, "Failed to remove excess video folder {Dir}", dir);
             }
         }
     }

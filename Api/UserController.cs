@@ -119,7 +119,7 @@ public class UserController : ControllerBase
         var cfg = Plugin.Instance!.Configuration;
         var mine = cfg.UserChannels
             .Where(c => c.UserId == userId)
-            .Select(c => new { c.ChannelId, c.Name, c.ExcludeShorts, c.Thumbnail })
+            .Select(c => new { c.ChannelId, c.Name, c.ExcludeShorts, c.Thumbnail, c.MaxVideos })
             .ToList();
         return new JsonResult(mine);
     }
@@ -198,6 +198,29 @@ public class UserController : ControllerBase
         return new JsonResult(new { status = "ok" });
     }
 
+    [HttpPost("JellyTuber/User/SetMaxVideos")]
+    [Authorize]
+    public ActionResult SetMaxVideos([FromBody] SetMaxVideosRequest req)
+    {
+        var cfg = Plugin.Instance!.Configuration;
+        var maxVideos = Math.Clamp(req.MaxVideos, 10, 50);
+        lock (Plugin.ConfigLock)
+        {
+            var entry = cfg.UserChannels.FirstOrDefault(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId);
+            if (entry is null)
+            {
+                return NotFound();
+            }
+
+            entry.MaxVideos = maxVideos;
+            Plugin.Instance.Save();
+        }
+
+        // Re-sync so raising/lowering the count is reflected on disk right away.
+        _taskManager.CancelIfRunningAndQueue<YouTubeSyncTask>();
+        return new JsonResult(new { status = "ok", maxVideos });
+    }
+
     /// <summary>Queue the "Sync YouTube (Fast)" scheduled task.</summary>
     [HttpPost("JellyTuber/User/Sync")]
     [Authorize]
@@ -257,7 +280,7 @@ public class UserController : ControllerBase
             var isShort = req.Url.Contains("/shorts/", StringComparison.OrdinalIgnoreCase);
             if (!isShort)
             {
-                var detector = new ShortsDetector(cfg.YtDlpPath, _httpClientFactory.CreateClient(), _logger);
+                var detector = new ShortsDetector(_httpClientFactory, _logger);
                 isShort = await detector.IsShortAsync(videoId, HttpContext.RequestAborted).ConfigureAwait(false);
             }
 
@@ -362,6 +385,13 @@ public class UserController : ControllerBase
         public string UserId { get; set; } = string.Empty;
         public string ChannelId { get; set; } = string.Empty;
         public bool ExcludeShorts { get; set; }
+    }
+
+    public class SetMaxVideosRequest
+    {
+        public string UserId { get; set; } = string.Empty;
+        public string ChannelId { get; set; } = string.Empty;
+        public int MaxVideos { get; set; }
     }
 
     public class AddVideoRequest

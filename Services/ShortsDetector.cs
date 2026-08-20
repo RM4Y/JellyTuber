@@ -31,14 +31,14 @@ public class ShortsDetector
 {
     private static readonly ConcurrentDictionary<string, bool> Cache = new();
 
-    private readonly string _ytDlpPath;
-    private readonly HttpClient? _http;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly HttpClient _http;
     private readonly ILogger _logger;
 
-    public ShortsDetector(string ytDlpPath, HttpClient? http, ILogger logger)
+    public ShortsDetector(IHttpClientFactory httpClientFactory, ILogger logger)
     {
-        _ytDlpPath = string.IsNullOrWhiteSpace(ytDlpPath) ? "yt-dlp" : ytDlpPath;
-        _http = http;
+        _httpClientFactory = httpClientFactory;
+        _http = httpClientFactory.CreateClient();
         _logger = logger;
     }
 
@@ -73,11 +73,6 @@ public class ShortsDetector
     /// </summary>
     private async Task<bool?> HttpProbeAsync(string videoId, CancellationToken ct)
     {
-        if (_http is null)
-        {
-            return null;
-        }
-
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(8));
 
@@ -136,9 +131,16 @@ public class ShortsDetector
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
         var token = timeoutCts.Token;
 
+        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, token).ConfigureAwait(false);
+        if (ytDlpPath is null)
+        {
+            _logger.LogWarning("yt-dlp is not available (download failed); skipping channel Shorts listing for {ChannelId}.", channelId);
+            return ids;
+        }
+
         var psi = new ProcessStartInfo
         {
-            FileName = _ytDlpPath,
+            FileName = ytDlpPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -201,9 +203,16 @@ public class ShortsDetector
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
         var token = timeoutCts.Token;
 
+        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, token).ConfigureAwait(false);
+        if (ytDlpPath is null)
+        {
+            _logger.LogWarning("yt-dlp is not available (download failed); keeping {VideoId}.", videoId);
+            return false;
+        }
+
         var psi = new ProcessStartInfo
         {
-            FileName = _ytDlpPath,
+            FileName = ytDlpPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,

@@ -90,6 +90,11 @@ internal static class PageHtml
   .shorts.on { border-color:var(--accent); background:var(--glow); color:var(--accent); }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--text-dim); }
   .shorts.on .dot { background:var(--accent); box-shadow:0 0 8px var(--accent); }
+  .maxvid { display:flex; align-items:center; gap:7px; padding:5px 7px; border-radius:999px;
+    border:1px solid var(--border); background:transparent; flex:none; }
+  .maxvid span { font-size:12.5px; font-weight:600; color:var(--text-dim); white-space:nowrap; }
+  .maxvid input[type=range] { width:74px; accent-color:var(--accent); }
+  .maxvid b { font-size:12.5px; font-weight:700; color:var(--accent); min-width:1.6em; text-align:right; }
   .remove { padding:8px 14px; border-radius:10px; border:1px solid var(--border); background:transparent;
     color:var(--text-dim); font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; flex:none; }
   .remove:hover { border-color:#e0738a; color:#e0738a; }
@@ -354,11 +359,23 @@ internal static class PageHtml
       list.forEach(function (c, idx) {
         var name = field(c, "Name"), cid = field(c, "ChannelId"), ex = field(c, "ExcludeShorts");
         var thumb = field(c, "Thumbnail");
+        var maxVideos = field(c, "MaxVideos") || 25;
         var card = document.createElement("div");
         card.className = "panel rowline"; card.style.padding = "14px 16px";
         card.appendChild(avatar(name, idx + 2, thumb));
         var nm = document.createElement("span"); nm.className = "name"; nm.style.fontSize = "15px"; nm.textContent = name;
         card.appendChild(nm);
+
+        var mv = document.createElement("div"); mv.className = "maxvid";
+        mv.innerHTML = '<span>Vidéos</span><input type="range" min="10" max="50" step="1" value="' + maxVideos + '" /><b>' + maxVideos + '</b>';
+        var mvRange = mv.querySelector("input"), mvVal = mv.querySelector("b");
+        mvRange.addEventListener("input", function () { mvVal.textContent = mvRange.value; });
+        mvRange.addEventListener("change", function () {
+          var n = parseInt(mvRange.value, 10);
+          api("/JellyTuber/User/SetMaxVideos", { method: "POST", body: JSON.stringify({ userId: userId, channelId: cid, maxVideos: n }) })
+            .then(function () { toast("Limite mise à jour : " + n + " vidéos."); });
+        });
+        card.appendChild(mv);
 
         var sh = document.createElement("button"); sh.className = "shorts" + (ex ? " on" : "");
         sh.innerHTML = '<span class="dot"></span>Exclure les Shorts';

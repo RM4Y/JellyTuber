@@ -99,7 +99,8 @@ public class YouTubeSyncTask : IScheduledTask
                     Url = uc.Url,
                     Mode = "Series",
                     ExcludeShorts = uc.ExcludeShorts,
-                    DestinationFolder = Path.Combine(config.LibraryFolder, SanitizeUser(uc.UserName))
+                    DestinationFolder = Path.Combine(config.LibraryFolder, SanitizeUser(uc.UserName)),
+                    MaxVideos = uc.MaxVideos
                 });
             }
         }
@@ -114,10 +115,6 @@ public class YouTubeSyncTask : IScheduledTask
         var http = _httpClientFactory.CreateClient();
         var api = new YouTubeApiClient(http, config.ApiKey, _logger);
         var writer = new LibraryWriter(http, _logger);
-
-        DateTime? cutoff = config.KeepDays > 0
-            ? DateTime.UtcNow.AddDays(-config.KeepDays)
-            : null;
 
         var baseAddress = config.JellyfinAddress.TrimEnd('/');
         var total = effectiveSources.Count;
@@ -146,7 +143,7 @@ public class YouTubeSyncTask : IScheduledTask
 
             try
             {
-                newItems += await SyncSourceAsync(source, config, api, writer, cutoff, baseAddress, cancellationToken)
+                newItems += await SyncSourceAsync(source, config, api, writer, baseAddress, cancellationToken)
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -233,7 +230,6 @@ public class YouTubeSyncTask : IScheduledTask
         PluginConfiguration config,
         YouTubeApiClient api,
         LibraryWriter writer,
-        DateTime? cutoff,
         string baseAddress,
         CancellationToken ct)
     {
@@ -241,6 +237,17 @@ public class YouTubeSyncTask : IScheduledTask
             ? config.LibraryFolder
             : source.DestinationFolder;
         var sourceRoot = Path.Combine(root, Sanitize(source.Name));
+
+        // How many of the most recent videos this channel should keep,
+        // clamped to the 10-50 range regardless of what's stored in config
+        // (older values, or bad user input, could be outside it).
+        var maxVideos = ClampMaxVideos(source.MaxVideos);
+
+        // Fetch a buffer beyond maxVideos since Shorts get filtered out
+        // afterwards; without it a channel full of Shorts could come up
+        // short of the requested count. Capped so a single source can never
+        // blow the API quota.
+        var fetchLimit = Math.Min(200, maxVideos * 4);
 
         // Resolve the playlist id we'll enumerate.
         string playlistId;
@@ -270,8 +277,8 @@ public class YouTubeSyncTask : IScheduledTask
             thumb = channel.ThumbnailUrl;
         }
 
-        var videos = await api.GetPlaylistVideosAsync(playlistId, cutoff, ct).ConfigureAwait(false);
-        _logger.LogInformation("Source {Name}: {Count} videos within window", source.Name, videos.Count);
+        var videos = await api.GetPlaylistVideosAsync(playlistId, fetchLimit, ct).ConfigureAwait(false);
+        _logger.LogInformation("Source {Name}: {Count} candidate videos fetched", source.Name, videos.Count);
 
         // Merge any duplicate folders left over from title changes before this
         // fix existed, then index what remains by video id so a video whose
@@ -293,7 +300,7 @@ public class YouTubeSyncTask : IScheduledTask
         // small bound and a per-call timeout, so the sync never stalls.
         if (source.ExcludeShorts)
         {
-            var shorts = new ShortsDetector(config.YtDlpPath, _httpClientFactory.CreateClient(), _logger);
+            var shorts = new ShortsDetector(_httpClientFactory, _logger);
 
             // (a) Most reliable: subtract the channel's dedicated Shorts tab.
             var channelId = DeriveChannelId(playlistId, source.Url);
@@ -378,6 +385,13 @@ public class YouTubeSyncTask : IScheduledTask
             }
         }
 
+        // Trim down to the requested count now that Shorts are out of the way
+        // (still newest-first here, so this keeps the most recent N).
+        if (videos.Count > maxVideos)
+        {
+            videos = videos.Take(maxVideos).ToList();
+        }
+
         var isSeries = !string.Equals(source.Mode, "Movies", StringComparison.OrdinalIgnoreCase);
         await writer.WriteChannelRootAsync(sourceRoot, title, description, thumb, isSeries, ct).ConfigureAwait(false);
 
@@ -404,10 +418,9 @@ public class YouTubeSyncTask : IScheduledTask
 
         _logger.LogInformation("Source {Name}: {Written} new videos written", source.Name, written);
 
-        if (cutoff.HasValue)
-        {
-            writer.CleanupOldVideos(sourceRoot, cutoff.Value);
-        }
+        // Enforce the keep-last-N-videos limit: prunes anything that aged out
+        // of the window, and shrinks the library if the limit was lowered.
+        writer.CleanupExcessVideos(sourceRoot, maxVideos);
 
         return written;
     }
@@ -416,7 +429,9 @@ public class YouTubeSyncTask : IScheduledTask
     /// Writes each user's individually-added videos into
     /// LibraryFolder/UserName/Mes Videos, and prunes ones they removed.
     /// Returns the channel-root folders written (to protect them from the
-    /// removed-channel cleanup pass). Manually-added videos ignore KeepDays.
+    /// removed-channel cleanup pass). Manually-added videos ignore the
+    /// per-channel MaxVideos limit - a user who added a video by URL keeps it
+    /// until they remove it themselves.
     /// </summary>
     private async Task<(List<string> Roots, int Written)> SyncUserVideosAsync(
         PluginConfiguration config,
@@ -697,6 +712,17 @@ public class YouTubeSyncTask : IScheduledTask
 
         var m = System.Text.RegularExpressions.Regex.Match(url ?? string.Empty, @"/channel/(UC[\w-]+)");
         return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>Clamps a channel's "keep last N videos" setting to 10-50; 0/unset falls back to 25.</summary>
+    private static int ClampMaxVideos(int value)
+    {
+        if (value <= 0)
+        {
+            value = 25;
+        }
+
+        return Math.Clamp(value, 10, 50);
     }
 
     private static string SanitizeUser(string name)

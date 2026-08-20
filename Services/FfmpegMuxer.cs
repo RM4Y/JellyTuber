@@ -103,7 +103,7 @@ internal static class FfmpegMuxer
     /// independently decodable by construction, at the cost of an actual
     /// encode pass instead of a copy.
     /// </summary>
-    public static Process StartContinuousSegmenter(string ffmpegPath, string videoUrl, string audioUrl, double startSeconds, int startSegmentNumber, int segmentSeconds, string outputDir, string videoEncoder, int sourceHeight)
+    public static Process StartContinuousSegmenter(string ffmpegPath, string videoUrl, string audioUrl, double startSeconds, int startSegmentNumber, int segmentSeconds, string outputDir, string videoEncoder, int sourceHeight, bool isSameNetwork)
     {
         var psi = new ProcessStartInfo
         {
@@ -145,8 +145,6 @@ internal static class FfmpegMuxer
         psi.ArgumentList.Add("-c:v");
         psi.ArgumentList.Add(videoEncoder);
 
-        var bitrateBps = PickVideoBitrateBps(sourceHeight);
-
         if (string.Equals(videoEncoder, "libx264", StringComparison.Ordinal))
         {
             // Speed over compression efficiency: segments are produced
@@ -155,29 +153,50 @@ internal static class FfmpegMuxer
             psi.ArgumentList.Add("-preset");
             psi.ArgumentList.Add("veryfast");
 
-            // CRF for quality, maxrate/bufsize as a real VBV ceiling on top -
-            // the standard "capped CRF" recipe. This matters specifically for
-            // remote (proxied) playback: the output has to fit through
-            // whatever upload bandwidth the server's own connection has,
-            // which is usually the tightest link in the whole path - letting
-            // x264 pick an unbounded bitrate for high-motion 1080p60 source
-            // can outrun a typical home uplink even though local playback
-            // never notices.
+            // 21 -> 19: a real quality bump for a marginal CPU cost at
+            // "veryfast" - x264's speed/quality curve is fairly flat in this
+            // range, the preset dominates encode time far more than a 2-point
+            // CRF change does. Applies to both tiers: for LAN (no maxrate
+            // cap at all, see below) this directly raises the ceiling; for
+            // remote, the existing maxrate/bufsize cap still protects the
+            // uplink on the high-motion segments that would otherwise blow
+            // past it - CRF only lowers the *target* for everything below
+            // that cap.
             psi.ArgumentList.Add("-crf");
-            psi.ArgumentList.Add("21");
-            psi.ArgumentList.Add("-maxrate");
-            psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
-            psi.ArgumentList.Add("-bufsize");
-            psi.ArgumentList.Add((bitrateBps * 2).ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("19");
+
+            if (!isSameNetwork)
+            {
+                // maxrate/bufsize on top of CRF as a real VBV ceiling - the
+                // standard "capped CRF" recipe. Only applied for remote
+                // (proxied) playback: there, the output has to fit through
+                // whatever upload bandwidth the server's own connection has,
+                // which is usually the tightest link in the whole path -
+                // letting x264 pick an unbounded bitrate for high-motion
+                // 1080p60 source can outrun a typical home uplink. A
+                // same-network client shares the LAN's own bandwidth, not
+                // the server's uplink, so there's nothing to protect here -
+                // let CRF alone decide the bitrate, same as it would for
+                // any local encode.
+                var bitrateBps = PickVideoBitrateBps(sourceHeight, isSameNetwork: false);
+                psi.ArgumentList.Add("-maxrate");
+                psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
+                psi.ArgumentList.Add("-bufsize");
+                psi.ArgumentList.Add((bitrateBps * 2).ToString(CultureInfo.InvariantCulture));
+            }
         }
         else if (string.Equals(videoEncoder, "libopenh264", StringComparison.Ordinal))
         {
             // libopenh264's rate control needs to be explicitly switched into
             // bitrate mode - its default ("quality" mode) ignores -b:v
             // entirely (confirmed via real encode: -b:v alone had no effect
-            // on output size). Even in bitrate mode its VBV-style ceiling is
-            // considerably softer than x264's - treat this as a best-effort
-            // cap for the software fallback encoder, not a hard guarantee.
+            // on output size) - so unlike libx264 above, this encoder can't
+            // just drop the cap for same-network playback; it always needs
+            // an explicit target. It gets the same-network ladder's much
+            // higher ceiling instead, which is still a real cap (openh264's
+            // VBV-style enforcement is considerably softer than x264's -
+            // treat this as best-effort either way).
+            var bitrateBps = PickVideoBitrateBps(sourceHeight, isSameNetwork);
             psi.ArgumentList.Add("-rc_mode");
             psi.ArgumentList.Add("bitrate");
             psi.ArgumentList.Add("-allow_skip_frames");
@@ -211,24 +230,44 @@ internal static class FfmpegMuxer
     }
 
     /// <summary>
-    /// A conservative H.264 bitrate ceiling per source height, in the same
-    /// range common streaming ladders use (YouTube/Netflix-style). Used to
-    /// cap re-encode output so remote/proxied playback fits through a
-    /// typical home upload link instead of an unbounded encode matching
-    /// (or exceeding) the source's own bitrate.
+    /// A H.264 bitrate ceiling per source height. Two ladders:
+    /// <paramref name="isSameNetwork"/> false (remote/proxied playback) uses
+    /// a conservative ceiling, in the same range common streaming ladders
+    /// use (YouTube/Netflix-style), so the encode fits through a typical
+    /// home upload link instead of an unbounded encode matching (or
+    /// exceeding) the source's own bitrate - that link is usually the
+    /// tightest one in the path for a remote client. <paramref name="isSameNetwork"/>
+    /// true (LAN playback) uses a much higher ceiling instead, since a local
+    /// client shares the LAN's bandwidth rather than the server's own
+    /// uplink - there's no equivalent bottleneck to protect there, and the
+    /// old conservative ceiling was needlessly capping local quality below
+    /// what the source (and the network) could actually support. Only
+    /// actually load-bearing for libopenh264 - libx264 skips the cap
+    /// entirely for the same-network case (see call site).
     /// </summary>
-    private static int PickVideoBitrateBps(int height)
+    public static int PickVideoBitrateBps(int height, bool isSameNetwork)
     {
-        return height switch
-        {
-            <= 0 => 4_500_000,
-            <= 360 => 900_000,
-            <= 480 => 1_500_000,
-            <= 720 => 2_800_000,
-            <= 1080 => 4_500_000,
-            <= 1440 => 8_000_000,
-            _ => 14_000_000
-        };
+        return isSameNetwork
+            ? height switch
+            {
+                <= 0 => 9_000_000,
+                <= 360 => 1_800_000,
+                <= 480 => 3_000_000,
+                <= 720 => 6_000_000,
+                <= 1080 => 9_000_000,
+                <= 1440 => 16_000_000,
+                _ => 28_000_000
+            }
+            : height switch
+            {
+                <= 0 => 4_500_000,
+                <= 360 => 900_000,
+                <= 480 => 1_500_000,
+                <= 720 => 2_800_000,
+                <= 1080 => 4_500_000,
+                <= 1440 => 8_000_000,
+                _ => 14_000_000
+            };
     }
 
     private static void AddSegmenterInput(ProcessStartInfo psi, string url, double startSeconds)

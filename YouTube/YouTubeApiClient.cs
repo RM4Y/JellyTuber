@@ -116,12 +116,14 @@ public class YouTubeApiClient
 
     /// <summary>
     /// Enumerate videos of a playlist (works for an uploads playlist or any
-    /// regular playlist), newest first, stopping once videos fall outside the
-    /// age window. <paramref name="cutoffUtc"/> = null means no age limit.
+    /// regular playlist), newest first, stopping once <paramref name="maxCount"/>
+    /// videos have been collected (the uploads playlist is newest-first, so
+    /// this naturally yields the most recent N). Pass 0 or a negative value
+    /// for no limit.
     /// </summary>
     public async Task<List<YouTubeVideo>> GetPlaylistVideosAsync(
         string playlistId,
-        DateTime? cutoffUtc,
+        int maxCount,
         CancellationToken ct)
     {
         var results = new List<YouTubeVideo>();
@@ -143,7 +145,6 @@ public class YouTubeApiClient
                 break;
             }
 
-            var hitOldVideo = false;
             foreach (var item in page.Items)
             {
                 var videoId = item.ContentDetails?.VideoId;
@@ -157,13 +158,6 @@ public class YouTubeApiClient
                     ?? item.Snippet?.PublishedAt
                     ?? DateTime.MinValue;
 
-                if (cutoffUtc.HasValue && published < cutoffUtc.Value)
-                {
-                    // Uploads playlist is newest-first, so we can stop early.
-                    hitOldVideo = true;
-                    break;
-                }
-
                 results.Add(new YouTubeVideo
                 {
                     VideoId = videoId,
@@ -172,9 +166,14 @@ public class YouTubeApiClient
                     PublishedAt = published.ToUniversalTime(),
                     ThumbnailUrl = item.Snippet?.Thumbnails?.Best() ?? string.Empty
                 });
+
+                if (maxCount > 0 && results.Count >= maxCount)
+                {
+                    return results;
+                }
             }
 
-            pageToken = hitOldVideo ? null : page.NextPageToken;
+            pageToken = page.NextPageToken;
         }
         while (!string.IsNullOrEmpty(pageToken) && !ct.IsCancellationRequested);
 

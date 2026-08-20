@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Plugin.JellyTuber.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
@@ -88,6 +89,23 @@ public class JellyTuberMediaSourceProvider : IMediaSourceProvider
             return Enumerable.Empty<MediaSourceInfo>();
         }
 
+        // Best-effort display numbers, deliberately without resolving the
+        // video here: this provider runs at PlaybackInfo time, before
+        // PlaybackController ever calls yt-dlp, and that's the whole point
+        // (see the class doc) - calling PlaybackResolver from here would
+        // reintroduce the exact resolve latency this provider exists to
+        // hide. So Height/Width come from the plugin's own configured
+        // ceiling (MaxHeight) rather than the actual source, and BitRate
+        // uses FfmpegMuxer's conservative (remote) ladder for the same
+        // reason PickVideoBitrateBps itself is conservative - an
+        // under-promise is harmless, an over-promise can feed a client's
+        // own bandwidth-based quality decisions bad data.
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var height = config.MaxHeight > 0 ? config.MaxHeight : 1080;
+        var width = (int)Math.Round(height * 16.0 / 9.0);
+        var videoBitrate = FfmpegMuxer.PickVideoBitrateBps(height, isSameNetwork: false);
+        const int approximateAudioBitrateBps = 128_000;
+
         var source = new MediaSourceInfo
         {
             Id = item.Id.ToString("N"),
@@ -97,6 +115,7 @@ public class JellyTuberMediaSourceProvider : IMediaSourceProvider
             Name = item.Name,
             IsRemote = true,
             RunTimeTicks = item.RunTimeTicks,
+            Bitrate = videoBitrate + approximateAudioBitrateBps,
             SupportsProbing = false,
             SupportsDirectPlay = true,
             SupportsDirectStream = true,
@@ -110,8 +129,12 @@ public class JellyTuberMediaSourceProvider : IMediaSourceProvider
                     Type = MediaStreamType.Video,
                     Index = 0,
                     Codec = "h264",
+                    Profile = "high",
                     IsAVC = true,
                     IsDefault = true,
+                    Width = width,
+                    Height = height,
+                    BitRate = videoBitrate,
                 },
                 new()
                 {
@@ -120,6 +143,7 @@ public class JellyTuberMediaSourceProvider : IMediaSourceProvider
                     Codec = "aac",
                     Channels = 2,
                     IsDefault = true,
+                    BitRate = approximateAudioBitrateBps,
                 },
             },
         };

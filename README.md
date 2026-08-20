@@ -19,6 +19,21 @@ files to your own library folder; the actual stream is resolved on demand, at
 playback time, directly from YouTube via `yt-dlp`. Nothing is cached or
 redistributed by the project itself.
 
+This is a self-hosted, single-server plugin, not a public streaming service:
+it's meant to run on a Jellyfin instance you administer, for you and the
+users you personally grant access to — the same trust model as Jellyfin
+itself.
+
+**On yt-dlp and Deno:** the plugin downloads official, unmodified release
+builds of [yt-dlp](https://github.com/yt-dlp/yt-dlp) and
+[Deno](https://deno.com/) directly from their own GitHub releases the first
+time it needs them (checksum-verified against each project's own published
+hashes), and keeps them updated. This repository does not vendor, embed, or
+redistribute either project's code in any form — it only automates an
+install step you would otherwise do by hand, from the same upstream sources.
+Both are used exactly as their own maintainers ship and license them (yt-dlp:
+Unlicense; Deno: MIT).
+
 Use it only with content you have the right to access and to watch this way —
 your own uploads, public-domain works, Creative Commons–licensed videos, or
 any other content whose rights holder and YouTube's Terms of Service permit
@@ -29,26 +44,19 @@ applicable copyright law, and any other regulation in your jurisdiction.
 The software is provided "as is", without warranty of any kind — see
 [LICENSE](LICENSE).
 
-**This plugin requires `yt-dlp` to be installed to work. The user is
-responsible for complying with third-party platforms' terms of service when
-using this tool.**
-
 ## Prerequisites
 
-Install these on the same host/container as Jellyfin before using the plugin:
+Nothing to install by hand for playback: the plugin downloads and manages
+its own copies of **yt-dlp** and **Deno** (see the Legal section above) the
+first time it needs them, into its own plugin data folder — no system
+install, no PATH setup, no config field to point at a binary.
 
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — resolves the actual video
-  stream at playback time. Required.
 - **ffmpeg** — YouTube only publishes a single combined video+audio file up
   to 360p; anything higher (up to real 4K) is separate video/audio streams
   that the plugin muxes on the fly (stream copy, no re-encode). No separate
-  install or config needed: the plugin uses Jellyfin's own bundled ffmpeg
-  (the same one configured under **Dashboard → Playback**), via Jellyfin's
-  `IMediaEncoder` service.
-- **[Deno](https://deno.com/)** — JS runtime yt-dlp uses to solve YouTube's
-  n-challenge, needed for 1080p+ formats to resolve. Required by the default
-  `YtDlpExtraArgs` config (`--js-runtimes deno:/usr/bin/deno`); adjust the path
-  or remove the flag if you install Deno elsewhere or don't need >720p.
+  install or config needed either: the plugin uses Jellyfin's own bundled
+  ffmpeg (the same one configured under **Dashboard → Playback**), via
+  Jellyfin's `IMediaEncoder` service.
 
 ## Quick install (Jellyfin plugin repository)
 
@@ -97,14 +105,8 @@ cp publish/Jellyfin.Plugin.JellyTuber.dll "$PLUGIN_DIR/"
 cp meta.json                               "$PLUGIN_DIR/"
 ```
 
-Restart Jellyfin. The plugin appears under **Dashboard → Plugins**.
-
-Make sure **yt-dlp** is installed and on PATH inside the same
-container/host (used only at playback time):
-
-```bash
-yt-dlp --version
-```
+Restart Jellyfin. The plugin appears under **Dashboard → Plugins**. Nothing
+else to install — see [Prerequisites](#prerequisites) above.
 
 ## 4. Configure
 
@@ -133,7 +135,8 @@ fast.
 
 Each `.strm` points to `http://<your-server>/JellyTuber/Stream/<videoId>`.
 When you press play, the plugin's controller runs yt-dlp to resolve the
-stream. YouTube only exposes a combined video+audio URL up to 360p; above
+stream (downloading yt-dlp and Deno on the very first play, if they aren't
+already cached in the plugin's data folder — a few seconds, one-time). YouTube only exposes a combined video+audio URL up to 360p; above
 that, video and audio are separate URLs, which the controller muxes on the
 fly with **ffmpeg** (stream copy, no re-encode) and pipes straight to the
 client — this is what lets quality go all the way up to real 4K instead of

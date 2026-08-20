@@ -68,7 +68,7 @@ public class PlaybackController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult> Stream([FromRoute] string videoId, CancellationToken ct)
     {
-        var resolver = new PlaybackResolver(_logger);
+        var resolver = new PlaybackResolver(_httpClientFactory, _logger);
 
         var clientIp = GetClientIp();
         var isSameNetwork = await LocalNetworkDetector.IsSameNetworkAsync(_httpClientFactory, clientIp, _logger, ct).ConfigureAwait(false);
@@ -80,8 +80,24 @@ public class PlaybackController : ControllerBase
             clientIp,
             isSameNetwork ? "SAME NETWORK (will try direct redirect first)" : "REMOTE (proxy pipeline only)");
 
+        var resolveSw = Stopwatch.StartNew();
+        Task<ResolvedStream?>? mainResolveTask = null;
+
         if (isSameNetwork)
         {
+            // Kick off the main DASH resolve at the same time as the
+            // manifest probe below, instead of only starting it after the
+            // probe fails: they're two independent yt-dlp invocations
+            // against the same video, and running them one after another
+            // paid for both IN FULL even though the manifest probe fails
+            // (no combined HLS) for the overwhelming majority of videos -
+            // see BuildFormat's doc comment. Only actually matters on a
+            // video's very first play; PlaybackResolver's own caching
+            // (including the negative-result cache on ResolveDirectAsync)
+            // makes every later play of the same video skip straight to a
+            // cache hit on both regardless.
+            mainResolveTask = resolver.ResolveAsync(videoId, ct);
+
             var directUrl = await resolver.ResolveDirectAsync(videoId, ct).ConfigureAwait(false);
             if (!string.IsNullOrEmpty(directUrl))
             {
@@ -96,8 +112,9 @@ public class PlaybackController : ControllerBase
             // instead of the 360p a plain redirect would be stuck with.
         }
 
-        var resolveSw = Stopwatch.StartNew();
-        var resolved = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
+        var resolved = mainResolveTask is not null
+            ? await mainResolveTask.ConfigureAwait(false)
+            : await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
         _logger.LogInformation("yt-dlp resolve for {VideoId} took {ElapsedMs}ms (cache hit if this is near 0ms)", videoId, resolveSw.ElapsedMilliseconds);
 
         if (resolved is null)
@@ -114,7 +131,7 @@ public class PlaybackController : ControllerBase
                 // independently time-addressable HLS segments (see Segment
                 // below) instead of one continuous muxed stream with
                 // byte-range-approximated seeking.
-                await WritePlaylistAsync(videoId, resolved, ct).ConfigureAwait(false);
+                await WritePlaylistAsync(videoId, resolved, isSameNetwork, ct).ConfigureAwait(false);
             }
             else
             {
@@ -213,12 +230,12 @@ public class PlaybackController : ControllerBase
     /// cached) since it's cheap to build and always reflects the current
     /// resolved duration.
     /// </summary>
-    private async Task WritePlaylistAsync(string videoId, ResolvedStream resolved, CancellationToken ct)
+    private async Task WritePlaylistAsync(string videoId, ResolvedStream resolved, bool isSameNetwork, CancellationToken ct)
     {
         var segmentBaseUrl = $"{GetExternalScheme()}://{Request.Host}/JellyTuber/Segment/{videoId}/";
         var playlist = OnDemandHlsPackager.BuildPlaylist(resolved.DurationSeconds, i => segmentBaseUrl + i.ToString(CultureInfo.InvariantCulture) + ".ts");
 
-        PrefetchFirstSegment(videoId, resolved);
+        PrefetchFirstSegment(videoId, resolved, isSameNetwork);
 
         Response.StatusCode = StatusCodes.Status200OK;
         Response.ContentType = "application/vnd.apple.mpegurl";
@@ -235,13 +252,13 @@ public class PlaybackController : ControllerBase
     /// dies with the response, but the packaging session needs to keep
     /// running for the Segment requests that follow it.
     /// </summary>
-    private void PrefetchFirstSegment(string videoId, ResolvedStream resolved)
+    private void PrefetchFirstSegment(string videoId, ResolvedStream resolved, bool isSameNetwork)
     {
         _ = Task.Run(async () =>
         {
             try
             {
-                await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, 0, _logger, CancellationToken.None).ConfigureAwait(false);
+                await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, 0, isSameNetwork, _logger, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -275,7 +292,16 @@ public class PlaybackController : ControllerBase
             return NotFound();
         }
 
-        var resolver = new PlaybackResolver(_logger);
+        // Recomputed independently of the Stream() request that handed out
+        // the playlist: this is a deterministic function of the requesting
+        // client's own IP, so the same client's segment requests always land
+        // on the same tier - and therefore the same session key - as the one
+        // its playlist/prefetch already started. See
+        // HlsPackagerSessionManager.SessionKey for why the tier has to be
+        // part of the key at all.
+        var isSameNetwork = await LocalNetworkDetector.IsSameNetworkAsync(_httpClientFactory, GetClientIp(), _logger, ct).ConfigureAwait(false);
+
+        var resolver = new PlaybackResolver(_httpClientFactory, _logger);
         var resolved = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
 
         if (resolved?.VideoUrl is null || resolved.AudioUrl is null)
@@ -283,7 +309,7 @@ public class PlaybackController : ControllerBase
             return NotFound($"Could not resolve video {videoId}");
         }
 
-        var path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, index, _logger, ct).ConfigureAwait(false);
+        var path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, index, isSameNetwork, _logger, ct).ConfigureAwait(false);
 
         // Same rationale as the retry in Stream(): a signed URL can go
         // stale mid-playback well before its cache entry expires. Also
@@ -296,7 +322,7 @@ public class PlaybackController : ControllerBase
 
             if (fresh?.VideoUrl is not null && fresh.AudioUrl is not null)
             {
-                path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, fresh, index, _logger, ct).ConfigureAwait(false);
+                path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, fresh, index, isSameNetwork, _logger, ct).ConfigureAwait(false);
             }
         }
 

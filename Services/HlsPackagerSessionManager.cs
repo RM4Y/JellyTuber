@@ -10,11 +10,12 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.JellyTuber.Services;
 
 /// <summary>
-/// Runs one continuous ffmpeg remux-to-segments process per video being
-/// played, rather than spawning a fresh ffmpeg process for every individual
-/// segment. See <see cref="FfmpegMuxer.StartContinuousSegmenter"/> for why
-/// re-seeking independently on every segment was rejected (it drifted audio
-/// out of sync with video every few seconds).
+/// Runs one continuous ffmpeg remux-to-segments process per video (and per
+/// network tier, see <see cref="SessionKey"/>) being played, rather than
+/// spawning a fresh ffmpeg process for every individual segment. See
+/// <see cref="FfmpegMuxer.StartContinuousSegmenter"/> for why re-seeking
+/// independently on every segment was rejected (it drifted audio out of
+/// sync with video every few seconds).
 ///
 /// A session is restarted (old process killed, new one spawned with a fresh
 /// input seek) only when the requested segment isn't one the current
@@ -23,8 +24,16 @@ namespace Jellyfin.Plugin.JellyTuber.Services;
 /// </summary>
 internal static class HlsPackagerSessionManager
 {
-    /// <summary>How long a session may sit unused before it's torn down.</summary>
-    private static readonly TimeSpan IdleTimeout = TimeSpan.FromSeconds(90);
+    /// <summary>
+    /// How long a session may sit unused before it's torn down. Was 90s;
+    /// raised to 5 minutes so an ordinary pause (bathroom break, phone call)
+    /// doesn't repay the full ~2-4s yt-dlp-resolve + first-segment-encode
+    /// startup cost on resume - a session that's still alive resumes near-
+    /// instantly instead. The cost of keeping it alive longer is one idle
+    /// ffmpeg process plus its already-produced .ts segments sitting in
+    /// /tmp until the next sweep - cheap compared to what it saves.
+    /// </summary>
+    private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(5);
 
     /// <summary>How long to wait for a requested segment file to materialize before giving up.</summary>
     private static readonly TimeSpan SegmentWaitTimeout = TimeSpan.FromSeconds(20);
@@ -36,26 +45,39 @@ internal static class HlsPackagerSessionManager
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new();
 
     /// <summary>
+    /// Sessions are keyed by videoId AND network tier, not videoId alone -
+    /// a same-network and a remote viewer of the same video get their own
+    /// independent ffmpeg process (see <see cref="FfmpegMuxer.PickVideoBitrateBps"/>
+    /// for why the two need different bitrate ceilings). Without this split,
+    /// whichever viewer's request happened to start the shared session would
+    /// silently decide the bitrate for the other one too, since
+    /// <see cref="StartSession"/> replaces whatever session already lives
+    /// under the key.
+    /// </summary>
+    private static string SessionKey(string videoId, bool isSameNetwork) => videoId + (isSameNetwork ? "|lan" : "|remote");
+
+    /// <summary>
     /// Returns the path to the completed segment file for <paramref name="index"/>,
     /// starting or restarting the packaging session for <paramref name="videoId"/>
     /// as needed. Null if the segment never arrives (source exhausted past
     /// the end of the video, or the upstream URL failed) - the caller should
     /// treat that as a hard failure.
     /// </summary>
-    public static async Task<string?> GetSegmentAsync(IMediaEncoder mediaEncoder, string videoId, ResolvedStream resolved, int index, ILogger logger, CancellationToken ct)
+    public static async Task<string?> GetSegmentAsync(IMediaEncoder mediaEncoder, string videoId, ResolvedStream resolved, int index, bool isSameNetwork, ILogger logger, CancellationToken ct)
     {
         SweepIdle();
 
         var sw = Stopwatch.StartNew();
-        var session = await GetOrStartSessionAsync(mediaEncoder, videoId, resolved, index, forceRestart: false, logger, ct).ConfigureAwait(false);
+        var session = await GetOrStartSessionAsync(mediaEncoder, videoId, resolved, index, isSameNetwork, forceRestart: false, logger, ct).ConfigureAwait(false);
         var afterSessionMs = sw.ElapsedMilliseconds;
         var path = await WaitForSegmentAsync(session, index, ct).ConfigureAwait(false);
         if (path is not null || ct.IsCancellationRequested)
         {
             logger.LogInformation(
-                "HLS segment {VideoId}/{Index}: session ready in {SessionMs}ms, segment ready in {TotalMs}ms total",
+                "HLS segment {VideoId}/{Index} ({Tier}): session ready in {SessionMs}ms, segment ready in {TotalMs}ms total",
                 videoId,
                 index,
+                isSameNetwork ? "lan" : "remote",
                 afterSessionMs,
                 sw.ElapsedMilliseconds);
             return path;
@@ -71,7 +93,7 @@ internal static class HlsPackagerSessionManager
             SegmentWaitTimeout.TotalSeconds,
             sw.ElapsedMilliseconds);
 
-        session = await GetOrStartSessionAsync(mediaEncoder, videoId, resolved, index, forceRestart: true, logger, ct).ConfigureAwait(false);
+        session = await GetOrStartSessionAsync(mediaEncoder, videoId, resolved, index, isSameNetwork, forceRestart: true, logger, ct).ConfigureAwait(false);
         var result = await WaitForSegmentAsync(session, index, ct).ConfigureAwait(false);
         logger.LogInformation(
             "HLS segment {VideoId}/{Index}: ready in {TotalMs}ms total after forced restart (found={Found})",
@@ -82,12 +104,15 @@ internal static class HlsPackagerSessionManager
         return result;
     }
 
-    /// <summary>Tears down and forgets any packaging session for <paramref name="videoId"/>.</summary>
+    /// <summary>Tears down and forgets any packaging session (either network tier) for <paramref name="videoId"/>.</summary>
     public static void Invalidate(string videoId)
     {
-        if (Sessions.TryRemove(videoId, out var session))
+        foreach (var key in new[] { SessionKey(videoId, isSameNetwork: true), SessionKey(videoId, isSameNetwork: false) })
         {
-            session.Dispose();
+            if (Sessions.TryRemove(key, out var session))
+            {
+                session.Dispose();
+            }
         }
     }
 
@@ -104,16 +129,17 @@ internal static class HlsPackagerSessionManager
     /// </summary>
     private const int ForwardLookaheadSegments = 9;
 
-    private static async Task<Session> GetOrStartSessionAsync(IMediaEncoder mediaEncoder, string videoId, ResolvedStream resolved, int index, bool forceRestart, ILogger logger, CancellationToken ct)
+    private static async Task<Session> GetOrStartSessionAsync(IMediaEncoder mediaEncoder, string videoId, ResolvedStream resolved, int index, bool isSameNetwork, bool forceRestart, ILogger logger, CancellationToken ct)
     {
-        var gate = Gates.GetOrAdd(videoId, _ => new SemaphoreSlim(1, 1));
+        var key = SessionKey(videoId, isSameNetwork);
+        var gate = Gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var existing = Sessions.TryGetValue(videoId, out var s) ? s : null;
+            var existing = Sessions.TryGetValue(key, out var s) ? s : null;
             var reusable = !forceRestart && existing is not null && IsWithinReach(existing, index);
 
-            var session = reusable ? existing! : StartSession(mediaEncoder, videoId, resolved, index, logger);
+            var session = reusable ? existing! : StartSession(mediaEncoder, videoId, resolved, index, isSameNetwork, logger);
             session.LastAccessUtc = DateTime.UtcNow;
             return session;
         }
@@ -165,9 +191,10 @@ internal static class HlsPackagerSessionManager
         return index <= frontier + ForwardLookaheadSegments;
     }
 
-    private static Session StartSession(IMediaEncoder mediaEncoder, string videoId, ResolvedStream resolved, int baseIndex, ILogger logger)
+    private static Session StartSession(IMediaEncoder mediaEncoder, string videoId, ResolvedStream resolved, int baseIndex, bool isSameNetwork, ILogger logger)
     {
-        if (Sessions.TryRemove(videoId, out var old))
+        var key = SessionKey(videoId, isSameNetwork);
+        if (Sessions.TryRemove(key, out var old))
         {
             old.Dispose();
         }
@@ -177,7 +204,12 @@ internal static class HlsPackagerSessionManager
         Directory.CreateDirectory(dir);
 
         var videoEncoder = PickVideoEncoder(mediaEncoder);
-        logger.LogDebug("Starting HLS packaging session for {VideoId} at segment {BaseIndex} using {Encoder}", videoId, baseIndex, videoEncoder);
+        logger.LogDebug(
+            "Starting HLS packaging session for {VideoId} ({Tier}) at segment {BaseIndex} using {Encoder}",
+            videoId,
+            isSameNetwork ? "lan" : "remote",
+            baseIndex,
+            videoEncoder);
 
         var process = FfmpegMuxer.StartContinuousSegmenter(
             mediaEncoder.EncoderPath,
@@ -188,12 +220,13 @@ internal static class HlsPackagerSessionManager
             OnDemandHlsPackager.SegmentSeconds,
             dir,
             videoEncoder,
-            resolved.Height);
+            resolved.Height,
+            isSameNetwork);
 
         DrainStderrInBackground(process, logger, videoId);
 
         var session = new Session(dir, baseIndex, process);
-        Sessions[videoId] = session;
+        Sessions[key] = session;
         return session;
     }
 
@@ -238,12 +271,14 @@ internal static class HlsPackagerSessionManager
         {
             while (true)
             {
-                if (File.Exists(nextPath) || (session.Process.HasExited && File.Exists(path)))
+                var exited = HasExitedSafe(session.Process);
+
+                if (File.Exists(nextPath) || (exited && File.Exists(path)))
                 {
                     return path;
                 }
 
-                if (session.Process.HasExited && !File.Exists(path))
+                if (exited && !File.Exists(path))
                 {
                     return null;
                 }
@@ -256,6 +291,32 @@ internal static class HlsPackagerSessionManager
             // Either the client went away (ct) or we simply timed out
             // waiting for this segment to show up - both are "no segment".
             return null;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Process.HasExited"/> throws <see cref="InvalidOperationException"/>
+    /// ("No process is associated with this object"), not merely "true",
+    /// once the process has been Dispose()'d - which is exactly what a
+    /// concurrent restart on the SAME session key does mid-wait: two
+    /// requests can be waiting on one shared session (see
+    /// <see cref="SessionKey"/>), one of them decides to force a restart
+    /// (<see cref="StartSession"/> disposes the old <see cref="Session"/>,
+    /// including its <see cref="Process"/>), and the other is still sitting
+    /// right here reading <c>HasExited</c> off that same, now-disposed
+    /// object. Confirmed via a real 500 in production logs, not
+    /// theoretical. A racing dispose means the session is gone either way,
+    /// so treat it the same as a self-terminated process.
+    /// </summary>
+    private static bool HasExitedSafe(Process process)
+    {
+        try
+        {
+            return process.HasExited;
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
         }
     }
 
