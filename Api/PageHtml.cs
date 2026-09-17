@@ -314,8 +314,13 @@ internal static class PageHtml
 
   function api(path, opts) {
     opts = opts || {};
-    opts.headers = Object.assign({ "X-Emby-Token": token, "Content-Type": "application/json" }, opts.headers || {});
+    opts.headers = Object.assign({ "Authorization": 'MediaBrowser Token="' + token + '"', "Content-Type": "application/json" }, opts.headers || {});
     return fetch(path, opts).then(function (r) {
+      if (r.status === 401) {
+        logout();
+        document.getElementById("loginErr").textContent = "Session expirée, veuillez vous reconnecter.";
+        throw new Error(r.status);
+      }
       if (!r.ok) { throw new Error(r.status); }
       return r.status === 204 ? null : r.json();
     });
