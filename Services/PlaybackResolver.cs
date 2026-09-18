@@ -188,10 +188,22 @@ public class PlaybackResolver
         // Select an HLS format, then print ITS master manifest URL (shared by
         // all variants) rather than a single variant. The client then does
         // adaptive bitrate up to the best H.264 variant on its own.
+        //
+        // [acodec!=none] is load-bearing, not optional: without it this
+        // selector's "bv*[protocol^=m3u8]" fallback happily matches a
+        // VIDEO-ONLY m3u8 format (confirmed live - YouTube exposes only
+        // separate video-only/audio-only m3u8 tracks for regular VOD videos,
+        // never a real combined one) and hands the client a redirect straight
+        // to a silent, uncapped-resolution manifest (reproduced: a 4K VP9
+        // video-only track with zero audio) instead of falling through to
+        // the DASH pipeline below - which is what should happen essentially
+        // always, per this method's own doc comment about combined HLS being
+        // rare. This is what was making same-network playback look "blurry"/
+        // broken across the board, not a quality tradeoff.
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add("%(manifest_url)s");
         psi.ArgumentList.Add("-f");
-        psi.ArgumentList.Add("b[protocol^=m3u8]/bv*[protocol^=m3u8]");
+        psi.ArgumentList.Add("b[protocol^=m3u8][acodec!=none]");
 
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--no-warnings");
