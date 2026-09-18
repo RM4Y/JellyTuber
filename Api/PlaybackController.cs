@@ -237,9 +237,16 @@ public class PlaybackController : ControllerBase
 
         PrefetchFirstSegment(videoId, resolved, isSameNetwork);
 
+        // Some clients (confirmed with Infuse) refuse to even start
+        // playback of a stream whose response never declares a
+        // Content-Length, apparently checking for it before it's even
+        // parsed the body as an HLS playlist. Every other endpoint in this
+        // controller already sets it; this was the one gap.
+        var playlistBytes = System.Text.Encoding.UTF8.GetBytes(playlist);
         Response.StatusCode = StatusCodes.Status200OK;
         Response.ContentType = "application/vnd.apple.mpegurl";
-        await Response.WriteAsync(playlist, ct).ConfigureAwait(false);
+        Response.ContentLength = playlistBytes.Length;
+        await Response.Body.WriteAsync(playlistBytes, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -769,9 +776,15 @@ public class PlaybackController : ControllerBase
                     new Uri(url),
                     original => proxyBase + Uri.EscapeDataString(original));
 
+                // Same Content-Length gap as WritePlaylistAsync - see that
+                // method's comment. Any client that insists on a declared
+                // size before it'll even start reading a stream hits this on
+                // the remote/proxy pipeline too if left unset.
+                var rewrittenBytes = System.Text.Encoding.UTF8.GetBytes(rewritten);
                 Response.StatusCode = StatusCodes.Status200OK;
                 Response.ContentType = "application/vnd.apple.mpegurl";
-                await Response.WriteAsync(rewritten, ct).ConfigureAwait(false);
+                Response.ContentLength = rewrittenBytes.Length;
+                await Response.Body.WriteAsync(rewrittenBytes, ct).ConfigureAwait(false);
                 return;
             }
 
