@@ -9,6 +9,7 @@ using Jellyfin.Plugin.JellyTuber.Configuration;
 using Jellyfin.Plugin.JellyTuber.Services;
 using Jellyfin.Plugin.JellyTuber.YouTube;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
@@ -25,10 +26,14 @@ namespace Jellyfin.Plugin.JellyTuber.ScheduledTasks;
 /// </summary>
 public class YouTubeSyncTask : IScheduledTask
 {
+    /// <summary>How many seconds of HLS to pre-encode into <see cref="VideoCache"/> for each freshly synced video - see <see cref="SchedulePrecache"/>.</summary>
+    private const int PrecacheSeconds = 30;
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILibraryManager _libraryManager;
     private readonly IProviderManager _providerManager;
     private readonly IFileSystem _fileSystem;
+    private readonly IMediaEncoder _mediaEncoder;
     private readonly ILogger<YouTubeSyncTask> _logger;
 
     public YouTubeSyncTask(
@@ -36,12 +41,14 @@ public class YouTubeSyncTask : IScheduledTask
         ILibraryManager libraryManager,
         IProviderManager providerManager,
         IFileSystem fileSystem,
+        IMediaEncoder mediaEncoder,
         ILogger<YouTubeSyncTask> logger)
     {
         _httpClientFactory = httpClientFactory;
         _libraryManager = libraryManager;
         _providerManager = providerManager;
         _fileSystem = fileSystem;
+        _mediaEncoder = mediaEncoder;
         _logger = logger;
     }
 
@@ -116,6 +123,12 @@ public class YouTubeSyncTask : IScheduledTask
         var api = new YouTubeApiClient(http, config.ApiKey, _logger);
         var writer = new LibraryWriter(http, _logger);
 
+        // Bounds how many videos this sync pass may precache concurrently -
+        // same cap as background completion of an interrupted play (see
+        // HlsPackagerSessionManager.DemoteToBackground), so a sync full of
+        // new videos can't pile up CPU on top of whatever's already playing.
+        var precacheGate = new SemaphoreSlim(Math.Max(1, config.MaxConcurrentBackgroundEncodes));
+
         var baseAddress = config.JellyfinAddress.TrimEnd('/');
         var total = effectiveSources.Count;
         var done = 0;
@@ -143,7 +156,7 @@ public class YouTubeSyncTask : IScheduledTask
 
             try
             {
-                newItems += await SyncSourceAsync(source, config, api, writer, baseAddress, cancellationToken)
+                newItems += await SyncSourceAsync(source, config, api, writer, baseAddress, precacheGate, cancellationToken)
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -158,7 +171,7 @@ public class YouTubeSyncTask : IScheduledTask
         // Individual user-added videos -> LibraryFolder/UserName/Mes Videos
         try
         {
-            var (videoRoots, videoWrites) = await SyncUserVideosAsync(config, api, writer, baseAddress, cancellationToken)
+            var (videoRoots, videoWrites) = await SyncUserVideosAsync(config, api, writer, baseAddress, precacheGate, cancellationToken)
                 .ConfigureAwait(false);
             expectedRoots.AddRange(videoRoots);
             newItems += videoWrites;
@@ -231,6 +244,7 @@ public class YouTubeSyncTask : IScheduledTask
         YouTubeApiClient api,
         LibraryWriter writer,
         string baseAddress,
+        SemaphoreSlim precacheGate,
         CancellationToken ct)
     {
         var root = string.IsNullOrWhiteSpace(source.DestinationFolder)
@@ -413,6 +427,7 @@ public class YouTubeSyncTask : IScheduledTask
             if (created)
             {
                 written++;
+                SchedulePrecache(video.VideoId, precacheGate);
             }
         }
 
@@ -438,6 +453,7 @@ public class YouTubeSyncTask : IScheduledTask
         YouTubeApiClient api,
         LibraryWriter writer,
         string baseAddress,
+        SemaphoreSlim precacheGate,
         CancellationToken ct)
     {
         const string VideosFolderName = "Mes Videos";
@@ -527,6 +543,7 @@ public class YouTubeSyncTask : IScheduledTask
                 if (created)
                 {
                     written++;
+                    SchedulePrecache(uv.VideoId, precacheGate);
                 }
                 else
                 {
@@ -695,6 +712,41 @@ public class YouTubeSyncTask : IScheduledTask
             _providerManager.QueueRefresh(item.Id, options, RefreshPriority.Normal);
             _logger.LogInformation("Queued image/metadata refresh for library '{Name}'", vf.Name);
         }
+    }
+
+    /// <summary>
+    /// Fire-and-forget: precaches a freshly synced video via
+    /// <see cref="VideoPrecacher"/>, so the first real play starts straight
+    /// from disk instead of paying for yt-dlp resolution + ffmpeg
+    /// cold-start at that moment. Gated by <paramref name="gate"/> (sized
+    /// off <see cref="PluginConfiguration.MaxConcurrentBackgroundEncodes"/>)
+    /// so a sync that adds many videos at once can't pile up ffmpeg
+    /// processes. Never awaited by the caller: a sync run shouldn't be held
+    /// up by encoding work that only pays off on a later play, and this
+    /// uses its own <see cref="CancellationToken.None"/> for the same
+    /// reason the Stream endpoint's own first-segment prefetch does (see
+    /// <see cref="Api.PlaybackController.PrefetchFirstSegment"/>).
+    /// </summary>
+    private void SchedulePrecache(string videoId, SemaphoreSlim gate)
+    {
+        _ = Task.Run(async () =>
+        {
+            await gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await VideoPrecacher
+                    .PrecacheAsync(_httpClientFactory, _mediaEncoder, videoId, PrecacheSeconds, _logger, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Precache failed for {VideoId} (non-fatal - the first real play will just encode it then)", videoId);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        });
     }
 
     /// <summary>

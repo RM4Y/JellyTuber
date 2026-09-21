@@ -109,6 +109,7 @@ public class LibraryWriter
             if (Directory.Exists(videoDir))
             {
                 Directory.Delete(videoDir, recursive: true);
+                VideoCache.Delete(video.VideoId);
                 _logger.LogInformation("Removed Short folder: {Dir}", videoDir);
                 videoIndex?.Remove(video.VideoId);
                 return true;
@@ -357,7 +358,7 @@ public class LibraryWriter
             return;
         }
 
-        var entries = new List<(string Dir, DateTime Published)>();
+        var entries = new List<(string Dir, string VideoId, DateTime Published)>();
 
         foreach (var marker in Directory.EnumerateFiles(sourceRoot, VideoMarker, SearchOption.AllDirectories))
         {
@@ -379,7 +380,7 @@ public class LibraryWriter
                     continue;
                 }
 
-                entries.Add((dir, published));
+                entries.Add((dir, parts[0], published));
             }
             catch (Exception ex)
             {
@@ -387,19 +388,55 @@ public class LibraryWriter
             }
         }
 
-        foreach (var (dir, _) in entries.OrderByDescending(e => e.Published).Skip(maxVideos))
+        foreach (var (dir, videoId, _) in entries.OrderByDescending(e => e.Published).Skip(maxVideos))
         {
             try
             {
                 if (Directory.Exists(dir))
                 {
                     Directory.Delete(dir, recursive: true);
+                    VideoCache.Delete(videoId);
                     _logger.LogInformation("Removed video folder beyond the {Max}-video limit: {Dir}", maxVideos, dir);
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to remove excess video folder {Dir}", dir);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every video id found anywhere under <paramref name="rootFolder"/> (all
+    /// channels/users beneath it, recursively) - for one-off maintenance
+    /// passes over the whole library, like the precache backfill task, that
+    /// need every video id rather than one channel folder's worth.
+    /// </summary>
+    public IEnumerable<string> ListAllVideoIds(string rootFolder)
+    {
+        if (!Directory.Exists(rootFolder))
+        {
+            yield break;
+        }
+
+        foreach (var marker in Directory.EnumerateFiles(rootFolder, VideoMarker, SearchOption.AllDirectories))
+        {
+            string? videoId = null;
+            try
+            {
+                var parts = File.ReadAllText(marker).Split('|');
+                if (parts.Length > 0 && !string.IsNullOrWhiteSpace(parts[0]))
+                {
+                    videoId = parts[0];
+                }
+            }
+            catch (IOException)
+            {
+            }
+
+            if (videoId is not null)
+            {
+                yield return videoId;
             }
         }
     }
@@ -428,6 +465,7 @@ public class LibraryWriter
                     if (dir is not null && Directory.Exists(dir))
                     {
                         Directory.Delete(dir, recursive: true);
+                        VideoCache.Delete(id);
                         _logger.LogInformation("Removed video no longer in the list: {Dir}", dir);
                     }
                 }
@@ -485,6 +523,11 @@ public class LibraryWriter
 
                 try
                 {
+                    foreach (var videoId in ReadVideoIds(channelDir))
+                    {
+                        VideoCache.Delete(videoId);
+                    }
+
                     Directory.Delete(channelDir, recursive: true);
                     _logger.LogInformation("Removed channel no longer in the list: {Dir}", channelDir);
                 }
@@ -495,6 +538,29 @@ public class LibraryWriter
             }
 
             RemoveEmptyDirectories(scanRoot);
+        }
+    }
+
+    /// <summary>Reads every video id recorded in .ytmeta markers under <paramref name="channelDir"/>, so its cache can be purged alongside its files.</summary>
+    private IEnumerable<string> ReadVideoIds(string channelDir)
+    {
+        foreach (var marker in Directory.EnumerateFiles(channelDir, VideoMarker, SearchOption.AllDirectories))
+        {
+            string id;
+            try
+            {
+                id = File.ReadAllText(marker).Split('|')[0];
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read marker {Marker} while collecting video ids to purge from cache", marker);
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(id))
+            {
+                yield return id;
+            }
         }
     }
 

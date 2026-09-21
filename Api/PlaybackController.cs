@@ -68,6 +68,17 @@ public class PlaybackController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult> Stream([FromRoute] string videoId, CancellationToken ct)
     {
+        // Fully cached already (any earlier play, by anyone, finished
+        // encoding it) - skip yt-dlp/network-tier detection entirely and
+        // build the playlist straight from VideoCache's own record of the
+        // duration. This is the fast path the whole cache exists for.
+        var cachedMeta = VideoCache.TryGetMeta(videoId);
+        if (cachedMeta is { Completed: true })
+        {
+            await WriteCachedPlaylistAsync(videoId, cachedMeta.DurationSeconds, ct).ConfigureAwait(false);
+            return new EmptyResult();
+        }
+
         var resolver = new PlaybackResolver(_httpClientFactory, _logger);
 
         var clientIp = GetClientIp();
@@ -131,7 +142,7 @@ public class PlaybackController : ControllerBase
                 // independently time-addressable HLS segments (see Segment
                 // below) instead of one continuous muxed stream with
                 // byte-range-approximated seeking.
-                await WritePlaylistAsync(videoId, resolved, isSameNetwork, ct).ConfigureAwait(false);
+                await WritePlaylistAsync(videoId, resolved, ct).ConfigureAwait(false);
             }
             else
             {
@@ -230,12 +241,23 @@ public class PlaybackController : ControllerBase
     /// cached) since it's cheap to build and always reflects the current
     /// resolved duration.
     /// </summary>
-    private async Task WritePlaylistAsync(string videoId, ResolvedStream resolved, bool isSameNetwork, CancellationToken ct)
+    private async Task WritePlaylistAsync(string videoId, ResolvedStream resolved, CancellationToken ct)
+    {
+        PrefetchFirstSegment(videoId, resolved);
+        PrefetchCacheBoundary(videoId, resolved);
+        await WriteCachedPlaylistAsync(videoId, resolved.DurationSeconds, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes the same synthetic HLS playlist as <see cref="WritePlaylistAsync"/>,
+    /// but for a video that's already fully in <see cref="VideoCache"/> - no
+    /// <see cref="ResolvedStream"/> needed since every segment it'll ever
+    /// reference is already on disk.
+    /// </summary>
+    private async Task WriteCachedPlaylistAsync(string videoId, double durationSeconds, CancellationToken ct)
     {
         var segmentBaseUrl = $"{GetExternalScheme()}://{Request.Host}/JellyTuber/Segment/{videoId}/";
-        var playlist = OnDemandHlsPackager.BuildPlaylist(resolved.DurationSeconds, i => segmentBaseUrl + i.ToString(CultureInfo.InvariantCulture) + ".ts");
-
-        PrefetchFirstSegment(videoId, resolved, isSameNetwork);
+        var playlist = OnDemandHlsPackager.BuildPlaylist(durationSeconds, i => segmentBaseUrl + i.ToString(CultureInfo.InvariantCulture) + ".ts");
 
         // Some clients (confirmed with Infuse) refuse to even start
         // playback of a stream whose response never declares a
@@ -259,19 +281,78 @@ public class PlaybackController : ControllerBase
     /// dies with the response, but the packaging session needs to keep
     /// running for the Segment requests that follow it.
     /// </summary>
-    private void PrefetchFirstSegment(string videoId, ResolvedStream resolved, bool isSameNetwork)
+    private void PrefetchFirstSegment(string videoId, ResolvedStream resolved)
     {
         _ = Task.Run(async () =>
         {
             try
             {
-                await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, 0, isSameNetwork, _logger, CancellationToken.None).ConfigureAwait(false);
+                await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, 0, _logger, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Prefetch of first HLS segment failed for {VideoId} (non-fatal, the real request will just start the session itself)", videoId);
             }
         });
+    }
+
+    /// <summary>
+    /// For a video that's only partially cached - e.g. the first 30s from
+    /// <see cref="VideoPrecacher"/>, or a background job that got cut short
+    /// by <see cref="HlsPackagerSessionManager.DemoteToBackground"/>'s slot
+    /// cap - kicks off encoding of the first NOT-yet-cached segment as soon
+    /// as playback starts, instead of waiting for the player to actually
+    /// reach it. Confirmed in production: without this, that segment's
+    /// session doesn't start until the player's request for it arrives,
+    /// which - since the segments before it are served straight from disk,
+    /// near-instantly - lands right in the middle of otherwise smooth
+    /// playback and causes a real stall (a full reconnect + ffmpeg
+    /// cold-start), not merely a startup delay. Real playback takes real
+    /// wall-clock time to consume the already-cached segments (roughly
+    /// cachedCount * SegmentSeconds), which gives this a large head start -
+    /// typically tens of seconds - to have a session already running by the
+    /// time the player gets there.
+    /// </summary>
+    private void PrefetchCacheBoundary(string videoId, ResolvedStream resolved)
+    {
+        var meta = VideoCache.TryGetMeta(videoId);
+        if (meta is null || meta.Completed)
+        {
+            return;
+        }
+
+        var boundary = FindFirstMissingSegment(videoId, meta.TotalSegments);
+        if (boundary is null or 0)
+        {
+            // Nothing cached at all yet - PrefetchFirstSegment already
+            // covers starting a session at index 0.
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, boundary.Value, _logger, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Boundary prefetch failed for {VideoId} at segment {Index} (non-fatal, real playback will just hit the cold start it was trying to avoid)", videoId, boundary);
+            }
+        });
+    }
+
+    private static int? FindFirstMissingSegment(string videoId, int totalSegments)
+    {
+        for (var i = 0; i < totalSegments; i++)
+        {
+            if (!System.IO.File.Exists(VideoCache.GetSegmentPath(videoId, i)))
+            {
+                return i;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -299,14 +380,13 @@ public class PlaybackController : ControllerBase
             return NotFound();
         }
 
-        // Recomputed independently of the Stream() request that handed out
-        // the playlist: this is a deterministic function of the requesting
-        // client's own IP, so the same client's segment requests always land
-        // on the same tier - and therefore the same session key - as the one
-        // its playlist/prefetch already started. See
-        // HlsPackagerSessionManager.SessionKey for why the tier has to be
-        // part of the key at all.
-        var isSameNetwork = await LocalNetworkDetector.IsSameNetworkAsync(_httpClientFactory, GetClientIp(), _logger, ct).ConfigureAwait(false);
+        // Already on disk (from this or an earlier play, by anyone) - skip
+        // yt-dlp entirely.
+        var cachedPath = VideoCache.TryGetSegmentPath(videoId, index);
+        if (cachedPath is not null)
+        {
+            return await ServeSegmentFileAsync(cachedPath, ct).ConfigureAwait(false);
+        }
 
         var resolver = new PlaybackResolver(_httpClientFactory, _logger);
         var resolved = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
@@ -316,7 +396,7 @@ public class PlaybackController : ControllerBase
             return NotFound($"Could not resolve video {videoId}");
         }
 
-        var path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, index, isSameNetwork, _logger, ct).ConfigureAwait(false);
+        var path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, resolved, index, _logger, ct).ConfigureAwait(false);
 
         // Same rationale as the retry in Stream(): a signed URL can go
         // stale mid-playback well before its cache entry expires. Also
@@ -329,7 +409,7 @@ public class PlaybackController : ControllerBase
 
             if (fresh?.VideoUrl is not null && fresh.AudioUrl is not null)
             {
-                path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, fresh, index, isSameNetwork, _logger, ct).ConfigureAwait(false);
+                path = await HlsPackagerSessionManager.GetSegmentAsync(_mediaEncoder, videoId, fresh, index, _logger, ct).ConfigureAwait(false);
             }
         }
 
@@ -338,6 +418,12 @@ public class PlaybackController : ControllerBase
             return ct.IsCancellationRequested ? new EmptyResult() : NotFound();
         }
 
+        return await ServeSegmentFileAsync(path, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Streams a single already-materialized .ts segment file (cached or freshly produced) to the response.</summary>
+    private async Task<ActionResult> ServeSegmentFileAsync(string path, CancellationToken ct)
+    {
         FileStream fileStream;
         try
         {

@@ -111,6 +111,21 @@ public class PluginConfiguration : BasePluginConfiguration
     /// </summary>
     public string YtDlpExtraArgs { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Maximum total size (GB) of the persistent video cache
+    /// (see <see cref="Services.VideoCache"/>) before least-recently-accessed
+    /// videos get evicted. 0 = unlimited.
+    /// </summary>
+    public int VideoCacheMaxGB { get; set; } = 20;
+
+    /// <summary>
+    /// How many videos may keep encoding in the background (no active
+    /// viewer) at once, towards completing their cache. Keeps a burst of
+    /// stopped/idle sessions from piling up and starving CPU from newly
+    /// started playback - see <see cref="Services.PlaybackStopSessionCleaner"/>.
+    /// </summary>
+    public int MaxConcurrentBackgroundEncodes { get; set; } = 2;
+
     /// <summary>The channels / playlists to sync.</summary>
     public List<SourceItem> Sources { get; set; } = new();
 

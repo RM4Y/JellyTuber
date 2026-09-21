@@ -101,6 +101,20 @@
                     <div class="fieldDescription">Maximum number of channels shown when users search on the JellyTuber page (1-50). Each search costs 100 YouTube quota units. Default 20.</div>
                 </div>
 
+                <h3>Video cache</h3>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="VideoCacheMaxGB">Cache size limit (GB)</label>
+                    <input id="VideoCacheMaxGB" name="VideoCacheMaxGB" type="number" min="0" is="emby-input" />
+                    <div class="fieldDescription">Videos are fully cached on disk after their first play, so later plays never re-run yt-dlp/ffmpeg. Least-recently-played videos are evicted once the cache exceeds this size. 0 = unlimited. Default 20.</div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="MaxConcurrentBackgroundEncodes">Max background encodes</label>
+                    <input id="MaxConcurrentBackgroundEncodes" name="MaxConcurrentBackgroundEncodes" type="number" min="1" is="emby-input" />
+                    <div class="fieldDescription">How many videos may keep encoding towards a full cache after playback stops, at once. Keeps stopped/idle encodes from competing with newly started playback for CPU. Default 2.</div>
+                </div>
+
                 <h3>Sources</h3>
                 <p class="fieldDescription">
                     Les chaînes se gèrent désormais depuis la page utilisateur (y compris le nombre de
@@ -173,6 +187,8 @@
                 document.querySelector("#FetchVideoDetails").checked = !!config.FetchVideoDetails;
                 document.querySelector("#ShortsMaxProbeSeconds").value = config.ShortsMaxProbeSeconds != null ? config.ShortsMaxProbeSeconds : 180;
                 document.querySelector("#SearchResultsLimit").value = config.SearchResultsLimit != null ? config.SearchResultsLimit : 20;
+                document.querySelector("#VideoCacheMaxGB").value = config.VideoCacheMaxGB != null ? config.VideoCacheMaxGB : 20;
+                document.querySelector("#MaxConcurrentBackgroundEncodes").value = config.MaxConcurrentBackgroundEncodes != null ? config.MaxConcurrentBackgroundEncodes : 2;
                 Dashboard.hideLoadingMsg();
             });
         }
@@ -192,6 +208,10 @@
                 config.FetchVideoDetails = document.querySelector("#FetchVideoDetails").checked;
                 config.ShortsMaxProbeSeconds = parseInt(document.querySelector("#ShortsMaxProbeSeconds").value, 10) || 180;
                 config.SearchResultsLimit = Math.min(50, Math.max(1, parseInt(document.querySelector("#SearchResultsLimit").value, 10) || 20));
+                var videoCacheMaxGB = parseInt(document.querySelector("#VideoCacheMaxGB").value, 10);
+                config.VideoCacheMaxGB = Math.max(0, isNaN(videoCacheMaxGB) ? 20 : videoCacheMaxGB);
+                var maxConcurrentBackgroundEncodes = parseInt(document.querySelector("#MaxConcurrentBackgroundEncodes").value, 10);
+                config.MaxConcurrentBackgroundEncodes = Math.max(1, isNaN(maxConcurrentBackgroundEncodes) ? 2 : maxConcurrentBackgroundEncodes);
                 ApiClient.updatePluginConfiguration(JellyTuber.pluginId, config).then(function (result) {
                     Dashboard.processPluginConfigurationUpdateResult(result);
                 });

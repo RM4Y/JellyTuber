@@ -156,34 +156,29 @@ internal static class FfmpegMuxer
             // 21 -> 19: a real quality bump for a marginal CPU cost at
             // "veryfast" - x264's speed/quality curve is fairly flat in this
             // range, the preset dominates encode time far more than a 2-point
-            // CRF change does. Applies to both tiers: for LAN (no maxrate
-            // cap at all, see below) this directly raises the ceiling; for
-            // remote, the existing maxrate/bufsize cap still protects the
-            // uplink on the high-motion segments that would otherwise blow
-            // past it - CRF only lowers the *target* for everything below
+            // CRF change does. The maxrate/bufsize cap below still protects
+            // both tiers from CRF picking an unbounded bitrate on high-motion
+            // segments - CRF only lowers the *target* for everything below
             // that cap.
             psi.ArgumentList.Add("-crf");
             psi.ArgumentList.Add("19");
 
-            if (!isSameNetwork)
-            {
-                // maxrate/bufsize on top of CRF as a real VBV ceiling - the
-                // standard "capped CRF" recipe. Only applied for remote
-                // (proxied) playback: there, the output has to fit through
-                // whatever upload bandwidth the server's own connection has,
-                // which is usually the tightest link in the whole path -
-                // letting x264 pick an unbounded bitrate for high-motion
-                // 1080p60 source can outrun a typical home uplink. A
-                // same-network client shares the LAN's own bandwidth, not
-                // the server's uplink, so there's nothing to protect here -
-                // let CRF alone decide the bitrate, same as it would for
-                // any local encode.
-                var bitrateBps = PickVideoBitrateBps(sourceHeight, isSameNetwork: false);
-                psi.ArgumentList.Add("-maxrate");
-                psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
-                psi.ArgumentList.Add("-bufsize");
-                psi.ArgumentList.Add((bitrateBps * 2).ToString(CultureInfo.InvariantCulture));
-            }
+            // maxrate/bufsize on top of CRF as a real VBV ceiling - the
+            // standard "capped CRF" recipe. Originally remote-only (to fit
+            // the server's own upload link), now applied to LAN too: on a
+            // real 4K/high-motion source, veryfast/CRF-19 libx264 can take
+            // longer than the segment's own real-time duration to encode
+            // on typical hardware with no ceiling at all, which stalls
+            // playback exactly like a cache miss would. The same-network
+            // ladder's ceiling is still far above what a LAN needs to
+            // saturate (up to 28Mbps for >1440p), so this costs quality only
+            // on genuinely extreme source bitrates, not ordinary 1080p/4K
+            // content.
+            var bitrateBps = PickVideoBitrateBps(sourceHeight, isSameNetwork);
+            psi.ArgumentList.Add("-maxrate");
+            psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-bufsize");
+            psi.ArgumentList.Add((bitrateBps * 2).ToString(CultureInfo.InvariantCulture));
         }
         else if (string.Equals(videoEncoder, "libopenh264", StringComparison.Ordinal))
         {
