@@ -20,6 +20,9 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     {
         Instance = this;
         MigrateLegacyYtDlpSettings();
+
+        var dataFolderPath = DataFolderPath;
+        System.Threading.Tasks.Task.Run(() => Services.VideoCache.PurgeLegacyCaches(dataFolderPath));
     }
 
     public override string Name => "JellyTuber";

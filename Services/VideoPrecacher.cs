@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -58,13 +57,13 @@ internal static class VideoPrecacher
         var resolved = await resolver.ResolveAsync(videoId, ct).ConfigureAwait(false);
 
         // Mirrors PlaybackController.Stream's own gating: only a DASH source
-        // with a known duration and an H.264+AAC codec pair actually goes
+        // with a known duration and AAC audio actually goes
         // through HlsPackagerSessionManager/VideoCache. Anything else (no
-        // duration, VP9/AV1, a combined-HLS/direct URL) uses a different
+        // duration, Opus audio, a combined-HLS/direct URL) uses a different
         // playback path this cache doesn't cover, so there's nothing to
         // precache.
         if (resolved?.VideoUrl is null || resolved.AudioUrl is null
-            || resolved.DurationSeconds <= 0 || !resolved.IsTsCompatible)
+            || resolved.DurationSeconds <= 0 || !resolved.IsHlsSegmentable)
         {
             return;
         }
@@ -98,38 +97,10 @@ internal static class VideoPrecacher
             // targetSegments).
             HlsPackagerSessionManager.Invalidate(videoId);
 
-            // The process is confirmed gone. The continuous segmenter
-            // creates the NEXT segment's file the moment it starts writing
-            // it (that's the signal WaitForSegmentAsync waits on to know the
-            // previous one is done) - so killing it right after the target
-            // segment arrives reliably leaves a truncated/empty file one
-            // index past it. Confirmed in production: a 0-byte segment left
-            // behind this way is indistinguishable from a real cache hit to
-            // VideoCache.TryGetSegmentPath (File.Exists alone), so it would
-            // get served as a permanently broken segment instead of ever
-            // being re-encoded. Delete it; harmless no-op if it doesn't
-            // exist.
-            TryDeleteStraySegment(videoId, targetSegments);
-        }
-    }
-
-    private static void TryDeleteStraySegment(string videoId, int index)
-    {
-        try
-        {
-            var path = VideoCache.GetSegmentPath(videoId, index);
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (IOException)
-        {
-            // best effort
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // best effort
+            // No stray-segment cleanup needed here: killing the session
+            // mid-segment (the next one past the target is always already
+            // being written by then) deletes that truncated file itself -
+            // see HlsPackagerSessionManager's Session.Dispose.
         }
     }
 }

@@ -29,7 +29,20 @@ internal static class VideoCache
 {
     private const string MetaFileName = "meta.json";
 
-    private static string RootDir => Path.Combine(Plugin.Instance!.DataFolderPath, "videocache");
+    /// <summary>
+    /// Bumped whenever segments already on disk stop being compatible with
+    /// what a new session would produce - mixing the two in one video's
+    /// folder is exactly what breaks playback at the boundary. v2: segments
+    /// are cut on an exact 2s grid with absolute timestamps (see
+    /// <see cref="FfmpegMuxer.StartContinuousSegmenter"/>); v1 segments
+    /// drifted off that grid.
+    /// </summary>
+    private const string RootDirName = "videocache-v2";
+
+    /// <summary>Earlier, incompatible cache roots - see <see cref="PurgeLegacyCaches"/>.</summary>
+    private static readonly string[] LegacyRootDirNames = { "videocache" };
+
+    private static string RootDir => Path.Combine(Plugin.Instance!.DataFolderPath, RootDirName);
 
     public static string GetVideoDir(string videoId) => Path.Combine(RootDir, Sanitize(videoId));
 
@@ -70,7 +83,7 @@ internal static class VideoCache
     public static bool IsCompleted(string videoId) => TryGetMeta(videoId)?.Completed == true;
 
     /// <summary>Writes an initial meta.json only if one doesn't already exist - never clobbers a completed cache's own record.</summary>
-    public static void EnsureMeta(string videoId, double durationSeconds, int totalSegments)
+    public static void EnsureMeta(string videoId, double durationSeconds, int totalSegments, int encodedHeight)
     {
         if (TryGetMeta(videoId) is not null)
         {
@@ -81,6 +94,7 @@ internal static class VideoCache
         {
             DurationSeconds = durationSeconds,
             TotalSegments = totalSegments,
+            EncodedHeight = encodedHeight,
             Completed = false,
             LastAccessUtc = DateTime.UtcNow
         });
@@ -92,6 +106,7 @@ internal static class VideoCache
         {
             DurationSeconds = durationSeconds,
             TotalSegments = totalSegments,
+            EncodedHeight = TryGetMeta(videoId)?.EncodedHeight,
             Completed = true,
             LastAccessUtc = DateTime.UtcNow
         });
@@ -127,6 +142,62 @@ internal static class VideoCache
         catch (UnauthorizedAccessException)
         {
             // best effort
+        }
+    }
+
+    /// <summary>First index in [<paramref name="from"/>, <paramref name="totalSegments"/>) with no segment on disk, or null if they're all there.</summary>
+    public static int? FindFirstMissingSegment(string videoId, int from, int totalSegments)
+    {
+        for (var i = Math.Max(0, from); i < totalSegments; i++)
+        {
+            if (!File.Exists(GetSegmentPath(videoId, i)))
+            {
+                return i;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>First index in [<paramref name="from"/>, <paramref name="totalSegments"/>) that IS already on disk, or <paramref name="totalSegments"/> if none is.</summary>
+    public static int FindFirstCachedSegment(string videoId, int from, int totalSegments)
+    {
+        for (var i = Math.Max(0, from); i < totalSegments; i++)
+        {
+            if (File.Exists(GetSegmentPath(videoId, i)))
+            {
+                return i;
+            }
+        }
+
+        return totalSegments;
+    }
+
+    /// <summary>
+    /// Deletes cache roots written by earlier plugin versions (see
+    /// <see cref="RootDirName"/>). Best effort, meant to run once in the
+    /// background at startup.
+    /// </summary>
+    public static void PurgeLegacyCaches(string dataFolderPath)
+    {
+        foreach (var name in LegacyRootDirNames)
+        {
+            try
+            {
+                var dir = Path.Combine(dataFolderPath, name);
+                if (Directory.Exists(dir))
+                {
+                    Directory.Delete(dir, recursive: true);
+                }
+            }
+            catch (IOException)
+            {
+                // best effort
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // best effort
+            }
         }
     }
 
@@ -230,6 +301,14 @@ internal static class VideoCache
 
         [JsonPropertyName("totalSegments")]
         public int TotalSegments { get; set; }
+
+        /// <summary>
+        /// Output height the cached segments were encoded at. Null on a
+        /// meta.json written before 4K support - those were always encoded
+        /// at the source height, which was never above 1080p back then.
+        /// </summary>
+        [JsonPropertyName("encodedHeight")]
+        public int? EncodedHeight { get; set; }
 
         [JsonPropertyName("completed")]
         public bool Completed { get; set; }

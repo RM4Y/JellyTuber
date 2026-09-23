@@ -110,7 +110,7 @@ public class PlaybackController : ControllerBase
             mainResolveTask = resolver.ResolveAsync(videoId, ct);
 
             var directUrl = await resolver.ResolveDirectAsync(videoId, ct).ConfigureAwait(false);
-            if (!string.IsNullOrEmpty(directUrl))
+            if (!string.IsNullOrEmpty(directUrl) && !await HasAboveHdSegmentableSourceAsync(mainResolveTask).ConfigureAwait(false))
             {
                 return Redirect(directUrl!);
             }
@@ -135,9 +135,9 @@ public class PlaybackController : ControllerBase
 
         if (resolved.VideoUrl is not null && resolved.AudioUrl is not null)
         {
-            if (resolved.DurationSeconds > 0 && resolved.IsTsCompatible)
+            if (resolved.DurationSeconds > 0 && resolved.IsHlsSegmentable)
             {
-                // Known duration and an H.264+AAC source: hand out a
+                // Known duration and an AAC source: hand out a
                 // playlist that re-segments this DASH source into
                 // independently time-addressable HLS segments (see Segment
                 // below) instead of one continuous muxed stream with
@@ -147,9 +147,7 @@ public class PlaybackController : ControllerBase
             else
             {
                 // Either no duration (can't build a fixed-length segment
-                // playlist) or a codec MPEG-TS can't carry (VP9/AV1 video,
-                // Opus audio - typically heights above 1080p, where YouTube
-                // doesn't offer H.264). Fall back to muxing the whole thing
+                // playlist) or audio MPEG-TS can't carry (Opus). Fall back to muxing the whole thing
                 // as one continuous stream; seeking on it is only
                 // approximate.
                 var succeeded = await RelayMuxedAsync(resolved, ct).ConfigureAwait(false);
@@ -189,6 +187,26 @@ public class PlaybackController : ControllerBase
         }
 
         return new EmptyResult();
+    }
+
+    /// <summary>
+    /// YouTube's combined HLS manifest (the same-network redirect) tops out
+    /// at 1080p. When the main resolve found a &gt;1080p source the segment
+    /// pipeline can serve (only requested at all when MaxHeight allows it
+    /// and the GPU encoder is usable - see PlaybackResolver.BuildFormat),
+    /// the redirect would be a quality downgrade, so skip it. Both resolves
+    /// already run in parallel, so waiting on this one costs little.
+    /// </summary>
+    private static async Task<bool> HasAboveHdSegmentableSourceAsync(Task<ResolvedStream?> mainResolveTask)
+    {
+        var config = Plugin.Instance?.Configuration;
+        if (config is null || config.MaxHeight <= 1080 || !GpuEncoder.IsUsable)
+        {
+            return false;
+        }
+
+        var resolved = await mainResolveTask.ConfigureAwait(false);
+        return resolved is { Height: > 1080, IsHlsSegmentable: true, DurationSeconds: > 0 };
     }
 
     /// <summary>
@@ -243,6 +261,7 @@ public class PlaybackController : ControllerBase
     /// </summary>
     private async Task WritePlaylistAsync(string videoId, ResolvedStream resolved, CancellationToken ct)
     {
+        HlsPackagerSessionManager.EnsureCacheMatchesPlan(_mediaEncoder, videoId, resolved, _logger);
         PrefetchFirstSegment(videoId, resolved);
         PrefetchCacheBoundary(videoId, resolved);
         await WriteCachedPlaylistAsync(videoId, resolved.DurationSeconds, ct).ConfigureAwait(false);
@@ -321,7 +340,7 @@ public class PlaybackController : ControllerBase
             return;
         }
 
-        var boundary = FindFirstMissingSegment(videoId, meta.TotalSegments);
+        var boundary = VideoCache.FindFirstMissingSegment(videoId, 0, meta.TotalSegments);
         if (boundary is null or 0)
         {
             // Nothing cached at all yet - PrefetchFirstSegment already
@@ -340,19 +359,6 @@ public class PlaybackController : ControllerBase
                 _logger.LogDebug(ex, "Boundary prefetch failed for {VideoId} at segment {Index} (non-fatal, real playback will just hit the cold start it was trying to avoid)", videoId, boundary);
             }
         });
-    }
-
-    private static int? FindFirstMissingSegment(string videoId, int totalSegments)
-    {
-        for (var i = 0; i < totalSegments; i++)
-        {
-            if (!System.IO.File.Exists(VideoCache.GetSegmentPath(videoId, i)))
-            {
-                return i;
-            }
-        }
-
-        return null;
     }
 
     /// <summary>
@@ -380,9 +386,9 @@ public class PlaybackController : ControllerBase
             return NotFound();
         }
 
-        // Already on disk (from this or an earlier play, by anyone) - skip
-        // yt-dlp entirely.
-        var cachedPath = VideoCache.TryGetSegmentPath(videoId, index);
+        // Already on disk and fully written (from this or an earlier play,
+        // by anyone) - skip yt-dlp entirely.
+        var cachedPath = HlsPackagerSessionManager.TryGetCompletedSegmentPath(videoId, index);
         if (cachedPath is not null)
         {
             return await ServeSegmentFileAsync(cachedPath, ct).ConfigureAwait(false);

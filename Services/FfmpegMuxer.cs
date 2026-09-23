@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Text;
 
 namespace Jellyfin.Plugin.JellyTuber.Services;
 
@@ -91,6 +92,40 @@ internal static class FfmpegMuxer
     /// produced by this same process on one continuous, increasing
     /// timeline, without that large starting offset breaking the cut logic.
     ///
+    /// Segments from DIFFERENT sessions also have to line up, now that
+    /// they're mixed in <see cref="VideoCache"/> (e.g. the first 30s from
+    /// <see cref="VideoPrecacher"/>, the rest from the session a real play
+    /// starts at segment 15). Three things make segment N always hold
+    /// exactly [N*segmentSeconds, (N+1)*segmentSeconds) on the video's
+    /// absolute timeline, whichever session produced it - confirmed in
+    /// production that without them, playback stuttered and audio drifted
+    /// right at the precache boundary:
+    /// <list type="bullet">
+    /// <item><c>-segment_times</c> (an explicit cut grid) instead of
+    /// <c>-segment_time</c>: the latter skipped the very first cut (segment 0
+    /// came out 4s long) and cut at ANY keyframe past its target, so every
+    /// x264 scene-cut keyframe added an extra short segment and shifted
+    /// every later index off the playlist's grid.</item>
+    /// <item><c>-sc_threshold 0</c> (libx264): no scene-cut keyframes at all,
+    /// only the forced ones on the grid.</item>
+    /// <item><c>-initial_offset</c>: after an input seek ffmpeg rebases output
+    /// timestamps to ~0, so a session started at segment 15 used to emit
+    /// timestamps going BACKWARDS from the cached segment 14 before it.
+    /// This shifts them back to the absolute position (applied after the
+    /// segment muxer's cut decisions, so the grid above stays relative to
+    /// the session's own start).</item>
+    /// </list>
+    ///
+    /// <paramref name="videoEncoder"/> "h264_nvenc" (see <see cref="GpuEncoder"/>,
+    /// the default whenever usable) also decodes on the GPU and keeps frames
+    /// there end to end. <paramref name="scaleToOutputHeight"/> downscales to
+    /// <paramref name="outputHeight"/> first - the libx264 fallback for a
+    /// &gt;1080p source when the GPU isn't usable.
+    ///
+    /// The session stops after <paramref name="segmentCount"/> segments
+    /// (<c>-t</c>) - see <see cref="HlsPackagerSessionManager"/> for why it
+    /// never runs on into segments that are already cached.
+    ///
     /// Video is re-encoded with <paramref name="videoEncoder"/> (audio stays
     /// a stream copy) and <c>-force_key_frames</c> forces a real keyframe at
     /// every segment boundary. That's deliberate too: stream-copying video
@@ -103,7 +138,7 @@ internal static class FfmpegMuxer
     /// independently decodable by construction, at the cost of an actual
     /// encode pass instead of a copy.
     /// </summary>
-    public static Process StartContinuousSegmenter(string ffmpegPath, string videoUrl, string audioUrl, double startSeconds, int startSegmentNumber, int segmentSeconds, string outputDir, string videoEncoder, int sourceHeight, bool isSameNetwork)
+    public static Process StartContinuousSegmenter(string ffmpegPath, string videoUrl, string audioUrl, double startSeconds, int startSegmentNumber, int segmentCount, int segmentSeconds, string outputDir, string videoEncoder, int outputHeight, bool scaleToOutputHeight, bool isSameNetwork)
     {
         var psi = new ProcessStartInfo
         {
@@ -124,6 +159,18 @@ internal static class FfmpegMuxer
             psi.ArgumentList.Add(VaapiDevicePath);
         }
 
+        var isNvenc = string.Equals(videoEncoder, GpuEncoder.Encoder, StringComparison.Ordinal);
+        if (isNvenc)
+        {
+            // Input option - applies to the video input right below only.
+            // Falls back to software decoding on its own if CUDA can't
+            // decode this codec; h264_nvenc takes system-memory frames too.
+            psi.ArgumentList.Add("-hwaccel");
+            psi.ArgumentList.Add("cuda");
+            psi.ArgumentList.Add("-hwaccel_output_format");
+            psi.ArgumentList.Add("cuda");
+        }
+
         AddSegmenterInput(psi, videoUrl, startSeconds);
         AddSegmenterInput(psi, audioUrl, startSeconds);
 
@@ -141,6 +188,11 @@ internal static class FfmpegMuxer
             psi.ArgumentList.Add("-vf");
             psi.ArgumentList.Add("format=nv12,hwupload");
         }
+        else if (scaleToOutputHeight && outputHeight > 0)
+        {
+            psi.ArgumentList.Add("-vf");
+            psi.ArgumentList.Add($"scale=-2:{outputHeight.ToString(CultureInfo.InvariantCulture)}");
+        }
 
         psi.ArgumentList.Add("-c:v");
         psi.ArgumentList.Add(videoEncoder);
@@ -152,6 +204,11 @@ internal static class FfmpegMuxer
             // long-term, so a fast preset matters more than bitrate savings.
             psi.ArgumentList.Add("-preset");
             psi.ArgumentList.Add("veryfast");
+
+            // Keyframes only where -force_key_frames puts them (see the
+            // doc comment above).
+            psi.ArgumentList.Add("-sc_threshold");
+            psi.ArgumentList.Add("0");
 
             // 21 -> 19: a real quality bump for a marginal CPU cost at
             // "veryfast" - x264's speed/quality curve is fairly flat in this
@@ -174,11 +231,45 @@ internal static class FfmpegMuxer
             // saturate (up to 28Mbps for >1440p), so this costs quality only
             // on genuinely extreme source bitrates, not ordinary 1080p/4K
             // content.
-            var bitrateBps = PickVideoBitrateBps(sourceHeight, isSameNetwork);
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
             psi.ArgumentList.Add("-maxrate");
             psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
             psi.ArgumentList.Add("-bufsize");
             psi.ArgumentList.Add((bitrateBps * 2).ToString(CultureInfo.InvariantCulture));
+        }
+        else if (isNvenc)
+        {
+            // Measured on the real server (RTX 4070 Ti, 4K60 VP9 source):
+            // p4 encodes ~1.6x real time, p5 was slower than real time -
+            // and YouTube itself only serves the 4K source at ~1.5x, so a
+            // slower preset would buy nothing but stalls. Same capped-
+            // quality recipe as libx264: constant quality, bounded by the
+            // ladder's ceiling.
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
+            psi.ArgumentList.Add("-preset");
+            psi.ArgumentList.Add("p4");
+            psi.ArgumentList.Add("-tune");
+            psi.ArgumentList.Add("hq");
+            psi.ArgumentList.Add("-profile:v");
+            psi.ArgumentList.Add("high");
+            psi.ArgumentList.Add("-rc");
+            psi.ArgumentList.Add("vbr");
+            psi.ArgumentList.Add("-cq");
+            psi.ArgumentList.Add("21");
+            psi.ArgumentList.Add("-b:v");
+            psi.ArgumentList.Add("0");
+            psi.ArgumentList.Add("-maxrate");
+            psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-bufsize");
+            psi.ArgumentList.Add((bitrateBps * 2).ToString(CultureInfo.InvariantCulture));
+
+            // NVENC's equivalents of -sc_threshold 0 above, plus making the
+            // -force_key_frames ones real IDR frames so every segment is
+            // independently decodable.
+            psi.ArgumentList.Add("-no-scenecut");
+            psi.ArgumentList.Add("1");
+            psi.ArgumentList.Add("-forced-idr");
+            psi.ArgumentList.Add("1");
         }
         else if (string.Equals(videoEncoder, "libopenh264", StringComparison.Ordinal))
         {
@@ -191,7 +282,7 @@ internal static class FfmpegMuxer
             // higher ceiling instead, which is still a real cap (openh264's
             // VBV-style enforcement is considerably softer than x264's -
             // treat this as best-effort either way).
-            var bitrateBps = PickVideoBitrateBps(sourceHeight, isSameNetwork);
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
             psi.ArgumentList.Add("-rc_mode");
             psi.ArgumentList.Add("bitrate");
             psi.ArgumentList.Add("-allow_skip_frames");
@@ -207,10 +298,30 @@ internal static class FfmpegMuxer
         psi.ArgumentList.Add("-force_key_frames");
         psi.ArgumentList.Add($"expr:gte(t,n_forced*{segmentSeconds.ToString(CultureInfo.InvariantCulture)})");
 
+        psi.ArgumentList.Add("-t");
+        psi.ArgumentList.Add(((long)segmentCount * segmentSeconds).ToString(CultureInfo.InvariantCulture));
+
         psi.ArgumentList.Add("-f");
         psi.ArgumentList.Add("segment");
-        psi.ArgumentList.Add("-segment_time");
-        psi.ArgumentList.Add(segmentSeconds.ToString(CultureInfo.InvariantCulture));
+        if (segmentCount > 1)
+        {
+            var cutTimes = new StringBuilder();
+            for (var i = 1; i < segmentCount; i++)
+            {
+                if (i > 1)
+                {
+                    cutTimes.Append(',');
+                }
+
+                cutTimes.Append(((long)i * segmentSeconds).ToString(CultureInfo.InvariantCulture));
+            }
+
+            psi.ArgumentList.Add("-segment_times");
+            psi.ArgumentList.Add(cutTimes.ToString());
+        }
+
+        psi.ArgumentList.Add("-initial_offset");
+        psi.ArgumentList.Add(startSeconds.ToString("F3", CultureInfo.InvariantCulture));
         psi.ArgumentList.Add("-segment_format");
         psi.ArgumentList.Add("mpegts");
         psi.ArgumentList.Add("-reset_timestamps");

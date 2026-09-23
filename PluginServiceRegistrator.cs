@@ -35,5 +35,8 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         // stop instead of waiting for the idle sweep - see
         // PlaybackStopSessionCleaner's own doc comment.
         serviceCollection.AddHostedService<PlaybackStopSessionCleaner>();
+
+        // Decides whether >1080p sources can be GPU-encoded - see GpuEncoder.
+        serviceCollection.AddHostedService<GpuEncoderProbeService>();
     }
 }

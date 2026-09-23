@@ -42,15 +42,20 @@ public sealed class ResolvedStream
     public int Height { get; init; }
 
     /// <summary>
-    /// True when <see cref="VideoCodec"/>/<see cref="AudioCodec"/> are safe
-    /// to stream-copy into MPEG-TS (H.264 + AAC) for
-    /// <see cref="HlsPackagerSessionManager"/>-driven segmented playback.
-    /// YouTube's higher-efficiency codecs (VP9/AV1 video, Opus audio) aren't
-    /// reliably supported inside MPEG-TS, so those fall back to the
-    /// continuous single-stream mux instead.
+    /// True when <see cref="HlsPackagerSessionManager"/> can package this
+    /// source into HLS segments: audio is stream-copied into MPEG-TS, so it
+    /// has to be AAC (Opus isn't reliably supported there); video is always
+    /// re-encoded to H.264 anyway (see
+    /// <see cref="FfmpegMuxer.StartContinuousSegmenter"/>), so any codec
+    /// ffmpeg decodes works - VP9/AV1 is what YouTube serves above 1080p.
+    /// Anything else falls back to the continuous single-stream mux.
     /// </summary>
-    public bool IsTsCompatible =>
-        VideoCodec is not null && VideoCodec.StartsWith("avc1", StringComparison.OrdinalIgnoreCase)
+    public bool IsHlsSegmentable =>
+        VideoCodec is not null
+        && (VideoCodec.StartsWith("avc1", StringComparison.OrdinalIgnoreCase)
+            || VideoCodec.StartsWith("vp9", StringComparison.OrdinalIgnoreCase)
+            || VideoCodec.StartsWith("vp09", StringComparison.OrdinalIgnoreCase)
+            || VideoCodec.StartsWith("av01", StringComparison.OrdinalIgnoreCase))
         && AudioCodec is not null && AudioCodec.StartsWith("mp4a", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Video duration in seconds, 0 if unknown. Used to approximate seek offsets.</summary>
@@ -565,10 +570,17 @@ public class PlaybackResolver
     /// stream-copy into MPEG-TS for segmented playback (VP9/AV1 video and
     /// Opus audio aren't reliably supported inside MPEG-TS). YouTube only
     /// publishes H.264 up to 1080p60 - above that, VP9/AV1 are the only
-    /// codecs it exposes at all - so heights above 1080p fall back to
-    /// whatever codec is available; <see cref="ResolvedStream.IsTsCompatible"/>
-    /// then routes those to the older continuous single-stream mux instead
-    /// (approximate seeking, but broad codec support).
+    /// codecs it exposes at all. When MaxHeight allows it and
+    /// <see cref="GpuEncoder"/> is usable, a &gt;1080p SDR VP9/AV1 source
+    /// (+ AAC) is tried FIRST, ahead of everything else: the segmenter
+    /// re-encodes it to H.264 on the GPU (see
+    /// <see cref="ResolvedStream.IsHlsSegmentable"/>). Without that
+    /// preference, the H.264-first chain below always settled on 1080p even
+    /// with MaxHeight=2160 (confirmed on a real 4K60 video: 299+140,
+    /// 1080p60). HDR is excluded: h264_nvenc can't take its 10-bit frames,
+    /// and YouTube always publishes an SDR version alongside it. Without a
+    /// usable GPU encoder, &gt;1080p is never requested: libx264 can't
+    /// encode it in real time (see <see cref="GpuEncoder"/>).
     ///
     /// A premuxed single format is kept as a last resort. Honours the
     /// user's manual override.
@@ -585,7 +597,11 @@ public class PlaybackResolver
 
         var hls = $"b[protocol^=m3u8][vcodec^=avc1][height<=?{hh}]/b[protocol^=m3u8][height<=?{hh}]/";
 
-        return hls +
+        var aboveHd = h > 1080 && GpuEncoder.IsUsable
+            ? $"bv*[height>1080][height<=?{hh}][dynamic_range=SDR][protocol=https]+ba[acodec^=mp4a]/"
+            : string.Empty;
+
+        return aboveHd + hls +
                $"bv*[vcodec^=avc1][height<=?{hh}]+ba[acodec^=mp4a]/" +
                $"bv*[vcodec^=avc1][height<=?{hh}]+ba/" +
                $"bv*[height<=?{hh}]+ba/" +
