@@ -6,5 +6,5 @@
   "overview": "Fast YouTube indexing using the official Data API instead of scraping.",
   "owner": "you",
   "targetAbi": "10.11.6.0",
-  "version": "1.14.2.0"
+  "version": "1.14.3.0"
 }
