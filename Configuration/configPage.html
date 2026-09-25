@@ -62,6 +62,19 @@
                     <div class="fieldDescription">YouTube only publishes a combined video+audio file up to 360p; above that, video and audio are separate streams that this plugin merges on the fly using Jellyfin's own ffmpeg (no extra install/config needed) so the full quality, up to real 4K, reaches Jellyfin.</div>
                 </div>
 
+                <div class="selectContainer">
+                    <label class="selectLabel" for="HardwareEncoding">Hardware acceleration</label>
+                    <select is="emby-select" id="HardwareEncoding" name="HardwareEncoding">
+                        <option value="Auto">Auto (NVIDIA, then Intel QSV, then VAAPI)</option>
+                        <option value="Jellyfin">Same as Jellyfin (Dashboard &gt; Playback &gt; Transcoding)</option>
+                        <option value="Nvenc">NVIDIA NVENC</option>
+                        <option value="Qsv">Intel Quick Sync (QSV)</option>
+                        <option value="Vaapi">VAAPI (Intel / AMD)</option>
+                        <option value="None">None (CPU only)</option>
+                    </select>
+                    <div class="fieldDescription">Encoder used to build the HLS segments JellyTuber serves. The choice is tested with a real encode when saved; if it doesn't work, the plugin falls back to the CPU (sources above 1080p are then capped to 1080p). VAAPI/QSV use Jellyfin's VAAPI device, or <code>/dev/dri/renderD128</code>. The result is written to the Jellyfin log.</div>
+                </div>
+
                 <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="YtDlpFormatOverride">yt-dlp format override (advanced)</label>
                     <input id="YtDlpFormatOverride" name="YtDlpFormatOverride" type="text" is="emby-input" />
@@ -186,6 +199,7 @@
                 document.querySelector("#LibraryFolder").value = config.LibraryFolder || "";
                 document.querySelector("#JellyfinAddress").value = config.JellyfinAddress || "";
                 document.querySelector("#MaxHeight").value = String(config.MaxHeight || 1080);
+                document.querySelector("#HardwareEncoding").value = config.HardwareEncoding || "Auto";
                 document.querySelector("#AutoCreateUserLibraries").checked = config.AutoCreateUserLibraries !== false;
                 document.querySelector("#YtDlpFormatOverride").value = config.YtDlpFormatOverride || "";
                 document.querySelector("#YtDlpExtraArgs").value = config.YtDlpExtraArgs || "";
@@ -208,6 +222,7 @@
                 config.LibraryFolder = document.querySelector("#LibraryFolder").value;
                 config.JellyfinAddress = document.querySelector("#JellyfinAddress").value;
                 config.MaxHeight = parseInt(document.querySelector("#MaxHeight").value, 10) || 1080;
+                config.HardwareEncoding = document.querySelector("#HardwareEncoding").value || "Auto";
                 config.AutoCreateUserLibraries = document.querySelector("#AutoCreateUserLibraries").checked;
                 config.YtDlpFormatOverride = document.querySelector("#YtDlpFormatOverride").value;
                 config.YtDlpExtraArgs = document.querySelector("#YtDlpExtraArgs").value;

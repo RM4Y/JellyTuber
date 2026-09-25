@@ -520,15 +520,16 @@ internal static class HlsPackagerSessionManager
         var sourceHeight = resolved.Height;
         var aboveHd = sourceHeight > MaxCpuHeight;
 
-        var plan = GpuEncoder.IsUsable
-            ? (GpuEncoder.Encoder, sourceHeight, false)
+        var gpuEncoder = GpuEncoder.UsableEncoder;
+        var plan = gpuEncoder is not null
+            ? (gpuEncoder, sourceHeight, false)
             : (PickSoftwareEncoder(mediaEncoder), aboveHd ? MaxCpuHeight : sourceHeight, aboveHd);
 
         var meta = VideoCache.TryGetMeta(videoId);
         if (meta is not null)
         {
             var cachedHeight = meta.EncodedHeight ?? Math.Min(sourceHeight, MaxCpuHeight);
-            var isGpuFallback = aboveHd && !GpuEncoder.IsUsable && cachedHeight > MaxCpuHeight;
+            var isGpuFallback = aboveHd && gpuEncoder is null && cachedHeight > MaxCpuHeight;
             if (cachedHeight != plan.Item2 && !isGpuFallback)
             {
                 logger.LogInformation(
@@ -553,7 +554,7 @@ internal static class HlsPackagerSessionManager
     /// </summary>
     private static void ReportIfGpuStartFailed(Session session, ILogger logger)
     {
-        if (!string.Equals(session.VideoEncoder, GpuEncoder.Encoder, StringComparison.Ordinal)
+        if (!GpuEncoder.IsHardware(session.VideoEncoder)
             || !HasExitedSafe(session.Process)
             || session.FindFrontier() >= session.BaseIndex)
         {

@@ -134,6 +134,15 @@ public class PluginConfiguration : BasePluginConfiguration
     /// </summary>
     public int MaxConcurrentBackgroundEncodes { get; set; } = 2;
 
+    /// <summary>
+    /// Hardware encoder for HLS sessions: "Auto" (first working of NVENC,
+    /// QSV, VAAPI), "Jellyfin" (follow the server's transcoding setting),
+    /// "Nvenc", "Qsv", "Vaapi" or "None" (CPU only). Each choice is probed
+    /// with a real encode and falls back to the CPU if it doesn't work - see
+    /// <see cref="Services.GpuEncoder"/>.
+    /// </summary>
+    public string HardwareEncoding { get; set; } = "Auto";
+
     /// <summary>The channels / playlists to sync.</summary>
     public List<SourceItem> Sources { get; set; } = new();
 

@@ -64,9 +64,6 @@ internal static class FfmpegMuxer
         return process;
     }
 
-    /// <summary>Standard Linux render node for VAAPI, used when <paramref name="videoEncoder"/> is "h264_vaapi".</summary>
-    private const string VaapiDevicePath = "/dev/dri/renderD128";
-
     /// <summary>
     /// Starts one continuous ffmpeg process that seeks to
     /// <paramref name="startSeconds"/> ONCE and then muxes the rest of the
@@ -152,14 +149,12 @@ internal static class FfmpegMuxer
         psi.ArgumentList.Add("-loglevel");
         psi.ArgumentList.Add("error");
 
-        var isVaapi = string.Equals(videoEncoder, "h264_vaapi", StringComparison.Ordinal);
-        if (isVaapi)
+        foreach (var arg in GpuEncoder.GlobalArgs(videoEncoder))
         {
-            psi.ArgumentList.Add("-vaapi_device");
-            psi.ArgumentList.Add(VaapiDevicePath);
+            psi.ArgumentList.Add(arg);
         }
 
-        var isNvenc = string.Equals(videoEncoder, GpuEncoder.Encoder, StringComparison.Ordinal);
+        var isNvenc = string.Equals(videoEncoder, GpuEncoder.Nvenc, StringComparison.Ordinal);
         if (isNvenc)
         {
             // Input option - applies to the video input right below only.
@@ -181,12 +176,12 @@ internal static class FfmpegMuxer
         psi.ArgumentList.Add("-c:a");
         psi.ArgumentList.Add("copy");
 
-        if (isVaapi)
+        if (GpuEncoder.UploadFilter(videoEncoder) is { } uploadFilter)
         {
-            // VAAPI encoders take frames on the GPU surface, not plain system
-            // memory - upload the software-decoded frames first.
+            // VAAPI/QSV encoders take frames on the GPU surface, not plain
+            // system memory - upload the software-decoded frames first.
             psi.ArgumentList.Add("-vf");
-            psi.ArgumentList.Add("format=nv12,hwupload");
+            psi.ArgumentList.Add(uploadFilter);
         }
         else if (scaleToOutputHeight && outputHeight > 0)
         {
@@ -269,6 +264,39 @@ internal static class FfmpegMuxer
             psi.ArgumentList.Add("-no-scenecut");
             psi.ArgumentList.Add("1");
             psi.ArgumentList.Add("-forced-idr");
+            psi.ArgumentList.Add("1");
+        }
+        else if (string.Equals(videoEncoder, GpuEncoder.Vaapi, StringComparison.Ordinal))
+        {
+            // Same capped VBR ceiling as the others. h264_vaapi already
+            // turns every -force_key_frames frame into an IDR.
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
+            psi.ArgumentList.Add("-rc_mode");
+            psi.ArgumentList.Add("VBR");
+            psi.ArgumentList.Add("-b:v");
+            psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-maxrate");
+            psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-bufsize");
+            psi.ArgumentList.Add((bitrateBps * 2).ToString(CultureInfo.InvariantCulture));
+        }
+        else if (string.Equals(videoEncoder, GpuEncoder.Qsv, StringComparison.Ordinal))
+        {
+            // Speed-oriented preset like libx264's veryfast, capped VBR, and
+            // the forced keyframes made real IDRs so every segment is
+            // independently decodable.
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
+            psi.ArgumentList.Add("-preset");
+            psi.ArgumentList.Add("veryfast");
+            psi.ArgumentList.Add("-look_ahead");
+            psi.ArgumentList.Add("0");
+            psi.ArgumentList.Add("-b:v");
+            psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-maxrate");
+            psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-bufsize");
+            psi.ArgumentList.Add((bitrateBps * 2).ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-forced_idr");
             psi.ArgumentList.Add("1");
         }
         else if (string.Equals(videoEncoder, "libopenh264", StringComparison.Ordinal))
