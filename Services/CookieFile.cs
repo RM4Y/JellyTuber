@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.JellyTuber.Services;
@@ -14,6 +15,10 @@ namespace Jellyfin.Plugin.JellyTuber.Services;
 /// </summary>
 public sealed class CookieFile : IDisposable
 {
+    private static readonly TimeSpan BotCheckWarningInterval = TimeSpan.FromMinutes(10);
+
+    private static long _lastBotCheckWarningTicks;
+
     private readonly string? _path;
 
     private CookieFile(string? path) => _path = path;
@@ -59,6 +64,39 @@ public sealed class CookieFile : IDisposable
         {
             logger.LogWarning(ex, "Could not write the YouTube cookies file; running yt-dlp without cookies");
             return new CookieFile(null);
+        }
+    }
+
+    /// <summary>
+    /// Logs one actionable line when yt-dlp hit YouTube's "not a bot" wall:
+    /// with cookies configured that almost always means they expired or were
+    /// invalidated; without, that the server's IP got flagged. Throttled to
+    /// once per <see cref="BotCheckWarningInterval"/> since players retry a
+    /// failing stream every couple of seconds.
+    /// </summary>
+    public static void ReportBotCheck(string stderr, string? cookies, ILogger logger)
+    {
+        if (!stderr.Contains("confirm you", StringComparison.OrdinalIgnoreCase)
+            || !stderr.Contains("not a bot", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow.Ticks;
+        var last = Interlocked.Read(ref _lastBotCheckWarningTicks);
+        if (now - last < BotCheckWarningInterval.Ticks
+            || Interlocked.CompareExchange(ref _lastBotCheckWarningTicks, now, last) != last)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(cookies))
+        {
+            logger.LogError("YouTube is blocking this server as a bot. Paste a cookies.txt from a signed-in YouTube account into the JellyTuber settings (\"YouTube cookies\").");
+        }
+        else
+        {
+            logger.LogError("YouTube is blocking this server as a bot despite the configured cookies: they have most likely expired or been invalidated (account signed out/used elsewhere). Re-export cookies.txt from a private window and paste it again into the JellyTuber settings (\"YouTube cookies\").");
         }
     }
 

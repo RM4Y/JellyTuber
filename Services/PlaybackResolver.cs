@@ -257,6 +257,7 @@ public class PlaybackResolver
             if (process.ExitCode != 0)
             {
                 _logger.LogWarning("yt-dlp (HLS manifest) failed for {VideoId}: {Error}", videoId, stderr.Trim());
+                CookieFile.ReportBotCheck(stderr, config.YouTubeCookies, _logger);
                 return null;
             }
 
@@ -456,6 +457,7 @@ public class PlaybackResolver
             if (process.ExitCode != 0)
             {
                 _logger.LogWarning("yt-dlp failed for {VideoId}: {Error}", videoId, stderr.Trim());
+                CookieFile.ReportBotCheck(stderr, config.YouTubeCookies, _logger);
                 return null;
             }
 
