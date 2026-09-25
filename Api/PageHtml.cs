@@ -12,6 +12,7 @@ internal static class PageHtml
 <title>JellyTuber</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 280 280'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%238927be'/><stop offset='1' stop-color='%23a793f4'/></linearGradient></defs><rect width='280' height='280' rx='64' fill='url(%23g)'/><g transform='rotate(-16 140 145) translate(140 145) scale(1.25) translate(-140 -145)'><g stroke='%23ffffff' stroke-width='9' stroke-linecap='round' fill='none'><path d='M140.0,106.0 C137.3,106.7 129.3,108.4 124.0,110.1 C118.7,111.7 113.3,115.2 108.0,115.8 C102.7,116.4 97.3,115.4 92.0,113.8 C86.7,112.1 78.7,107.3 76.0,106.0'/><path d='M140.0,134.0 C138.0,134.8 132.0,137.7 128.0,139.0 C124.0,140.2 120.0,142.1 116.0,141.7 C112.0,141.2 108.0,138.2 104.0,136.5 C100.0,134.7 96.0,131.8 92.0,131.3 C88.0,130.9 82.0,133.6 80.0,134.0'/><path d='M140.0,158.0 C138.0,158.3 132.0,158.6 128.0,159.9 C124.0,161.2 120.0,164.5 116.0,165.8 C112.0,167.0 108.0,168.0 104.0,167.5 C100.0,167.0 96.0,164.3 92.0,162.7 C88.0,161.1 82.0,158.8 80.0,158.0'/><path d='M140.0,186.0 C137.3,186.8 129.3,189.2 124.0,190.8 C118.7,192.5 113.3,195.5 108.0,196.0 C102.7,196.5 97.3,195.4 92.0,193.8 C86.7,192.1 78.7,187.3 76.0,186.0'/></g><path d='M 140 90 L 210 145 L 140 200 Z' fill='%23ffffff' stroke='%23ffffff' stroke-width='22' stroke-linejoin='round'/></g></svg>" />
 <link rel="apple-touch-icon" href="/JellyTuber/apple-touch-icon.png" />
+<link rel="manifest" href="/JellyTuber/manifest.webmanifest" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-title" content="JellyTuber" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -240,6 +241,19 @@ internal static class PageHtml
         <p id="vmsg" style="margin:11px 0 0; font-size:13px; color:var(--text-dim); min-height:1px;"></p>
       </div>
 
+      <div class="panel" style="margin-bottom:26px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+          <h2 style="margin:0; font-size:16px; font-weight:600;">Partage depuis l'iPhone</h2>
+        </div>
+        <p style="margin:0 0 12px; font-size:13px; color:var(--text-dim);">Dans le raccourci, action « Texte » : coller le lien ci-dessous suivi de l'<b>Entrée du raccourci</b>, puis « Ouvrir les URL ». Il contient votre code secret personnel : ne le partagez pas.</p>
+        <div class="searchRow" style="display:flex; gap:10px;">
+          <input id="shareLink" class="field" style="flex:1; font-size:12.5px;" readonly value="Chargement…" />
+          <button id="copyShareBtn" class="btn-accent" style="flex-shrink:0; padding:13px 18px; font-size:14px;">Copier</button>
+        </div>
+        <button id="regenShareBtn" class="btn-ghost" style="margin-top:10px; padding:8px 14px; font-size:12.5px;">Générer un nouveau code</button>
+      </div>
+
       <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:13px;">
         <h2 style="margin:0; font-size:17px; font-weight:600;">Vidéo dans ma bibliothèque</h2>
         <span id="vcount" class="pill">0 vidéo</span>
@@ -272,6 +286,18 @@ internal static class PageHtml
   var token = localStorage.getItem("ytf_token");
   var userId = localStorage.getItem("ytf_uid");
   var userName = localStorage.getItem("ytf_uname");
+  // Link shared from another app (Android share sheet via the manifest's
+  // share_target, or an iOS Shortcut opening /JellyTuber?url=...). Stashed in
+  // sessionStorage so it survives the login step, and stripped from the
+  // address bar so a reload doesn't add it again.
+  (function () {
+    var qs = new URLSearchParams(location.search);
+    var shared = ["url", "text", "title"].map(function (k) { return qs.get(k) || ""; }).join(" ").trim();
+    if (shared) {
+      sessionStorage.setItem("jt_share", shared);
+      history.replaceState(null, "", location.pathname);
+    }
+  })();
   var PALETTE = ['#22c3b6','#2a9fd6','#7c6cf0','#e0738a','#e0a13b','#5bbf6a','#d76b4b','#4aa3a0','#b06fd6'];
 
   var SUN = '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>';
@@ -351,7 +377,21 @@ internal static class PageHtml
     show("app", false); show("themeBtn", false); show("login", true);
   }
 
-  function enterApp() { show("login", false); show("app", true); show("themeBtn", true); loadMine(); loadVideos(); }
+  function enterApp() {
+    show("login", false); show("app", true); show("themeBtn", true); loadMine(); loadVideos(); loadShareCode();
+    var shared = sessionStorage.getItem("jt_share");
+    if (shared) {
+      sessionStorage.removeItem("jt_share");
+      // Keep only the YouTube link: apps often share "Title https://youtu.be/..".
+      var m = shared.match(/https?:\/\/\S*(youtube\.com|youtu\.be)\S*/i);
+      switchTab("video");
+      document.getElementById("vq").value = m ? m[0] : shared;
+      addVideo(function () {
+        api("/JellyTuber/User/Sync", { method: "POST" }).catch(function () {});
+        toast("Vidéo ajoutée — synchronisation lancée.");
+      });
+    }
+  }
 
   function field(o, k) { return o[k] != null ? o[k] : o[k.charAt(0).toLowerCase() + k.slice(1)]; }
 
@@ -458,7 +498,25 @@ internal static class PageHtml
     });
   }
 
-  function addVideo() {
+  function setShareCode(r) {
+    document.getElementById("shareLink").value =
+      location.origin + "/JellyTuber/Share?code=" + encodeURIComponent(field(r, "Code")) + "&url=";
+  }
+  function loadShareCode() { api("/JellyTuber/User/ShareCode").then(setShareCode); }
+  function regenShareCode() {
+    if (!confirm("Générer un nouveau code ? L'ancien ne fonctionnera plus : il faudra mettre à jour le raccourci.")) return;
+    api("/JellyTuber/User/ShareCode/Regenerate", { method: "POST" }).then(function (r) {
+      setShareCode(r); toast("Nouveau code généré.");
+    });
+  }
+  function copyShareLink() {
+    var el = document.getElementById("shareLink");
+    (navigator.clipboard ? navigator.clipboard.writeText(el.value) : Promise.reject())
+      .catch(function () { el.select(); document.execCommand("copy"); })
+      .then(function () { toast("Copié."); });
+  }
+
+  function addVideo(onAdded) {
     var url = document.getElementById("vq").value.trim();
     var msg = document.getElementById("vmsg");
     if (!url) return;
@@ -473,7 +531,8 @@ internal static class PageHtml
           msg.style.color = "#e0738a";
           msg.textContent = "C'est un Short — non ajouté (l'application exclut les Shorts).";
         } else {
-          msg.textContent = ""; document.getElementById("vq").value = ""; toast("Vidéo ajoutée.");
+          msg.textContent = ""; document.getElementById("vq").value = "";
+          if (typeof onAdded === "function") { onAdded(); } else { toast("Vidéo ajoutée."); }
         }
         loadVideos();
       })
@@ -505,7 +564,9 @@ internal static class PageHtml
   document.getElementById("searchBtn").addEventListener("click", search);
   document.getElementById("tabBtnChaine").addEventListener("click", function () { switchTab("chaine"); });
   document.getElementById("tabBtnVideo").addEventListener("click", function () { switchTab("video"); });
-  document.getElementById("addVideoBtn").addEventListener("click", addVideo);
+  document.getElementById("addVideoBtn").addEventListener("click", function () { addVideo(); });
+  document.getElementById("copyShareBtn").addEventListener("click", copyShareLink);
+  document.getElementById("regenShareBtn").addEventListener("click", regenShareCode);
   document.getElementById("vq").addEventListener("keydown", function (e) { if (e.key === "Enter") addVideo(); });
   document.getElementById("themeBtn").addEventListener("click", function () {
     applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
@@ -517,6 +578,9 @@ internal static class PageHtml
   document.getElementById("p").addEventListener("keydown", function (e) { if (e.key === "Enter") login(); });
 
   applyTheme(localStorage.getItem("ytf_theme") || "dark");
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/JellyTuber/sw.js", { scope: "/JellyTuber" }).catch(function () {});
+  }
   if (token && userId) { enterApp(); }
 })();
 </script>

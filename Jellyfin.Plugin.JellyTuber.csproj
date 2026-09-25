@@ -28,6 +28,8 @@
   <ItemGroup>
     <EmbeddedResource Include="Configuration\configPage.html" />
     <EmbeddedResource Include="Configuration\AppleTouchIcon.png" />
+    <EmbeddedResource Include="Configuration\Icon192.png" />
+    <EmbeddedResource Include="Configuration\Icon512.png" />
   </ItemGroup>
 
   <!-- "3.5" is a reference copy of the old YouTubeFast plugin kept for

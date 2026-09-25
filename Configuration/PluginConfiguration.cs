@@ -140,6 +140,19 @@ public class PluginConfiguration : BasePluginConfiguration
     /// They sync into LibraryFolder/UserName/Mes Videos.
     /// </summary>
     public List<UserVideo> UserVideos { get; set; } = new();
+
+    /// <summary>
+    /// Per-user secret codes for /JellyTuber/Share?code=..&amp;url=.., which
+    /// adds a video without a Jellyfin session (iOS Shortcut share flow).
+    /// </summary>
+    public List<UserShareCode> ShareCodes { get; set; } = new();
+}
+
+/// <summary>A user's secret share code (see <see cref="PluginConfiguration.ShareCodes"/>).</summary>
+public class UserShareCode
+{
+    public string UserId { get; set; } = string.Empty;
+    public string Code { get; set; } = string.Empty;
 }
 
 /// <summary>A channel a specific Jellyfin user subscribed to via the self-service page.</summary>
