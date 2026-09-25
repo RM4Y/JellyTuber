@@ -112,6 +112,14 @@ public class PluginConfiguration : BasePluginConfiguration
     public string YtDlpExtraArgs { get; set; } = string.Empty;
 
     /// <summary>
+    /// Optional YouTube cookies in Netscape cookies.txt format, pasted
+    /// verbatim. When set, every yt-dlp call gets them via <c>--cookies</c>
+    /// (see <see cref="Services.CookieFile"/>) - the fix when YouTube starts
+    /// answering "Sign in to confirm you're not a bot" for the server's IP.
+    /// </summary>
+    public string YouTubeCookies { get; set; } = string.Empty;
+
+    /// <summary>
     /// Maximum total size (GB) of the persistent video cache
     /// (see <see cref="Services.VideoCache"/>) before least-recently-accessed
     /// videos get evicted. 0 = unlimited.

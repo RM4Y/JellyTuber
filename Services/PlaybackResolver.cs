@@ -239,6 +239,7 @@ public class PlaybackResolver
             psi.ArgumentList.Add(arg);
         }
 
+        using var cookieFile = CookieFile.Apply(psi, config.YouTubeCookies, _logger);
         psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
 
         try
@@ -437,6 +438,7 @@ public class PlaybackResolver
             psi.ArgumentList.Add(arg);
         }
 
+        using var cookieFile = CookieFile.Apply(psi, config.YouTubeCookies, _logger);
         psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
 
         try

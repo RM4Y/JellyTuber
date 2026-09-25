@@ -74,6 +74,12 @@
                     <div class="fieldDescription">Passed to every yt-dlp call, on top of the bundled Deno runtime the plugin already wires in automatically. Leave empty unless you need to tweak something specific.</div>
                 </div>
 
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="YouTubeCookies">YouTube cookies (cookies.txt)</label>
+                    <textarea id="YouTubeCookies" name="YouTubeCookies" is="emby-textarea" rows="6" spellcheck="false" autocomplete="off" style="font-family:monospace; font-size:12px; width:100%; box-sizing:border-box;"></textarea>
+                    <div class="fieldDescription">Paste the content of a Netscape-format <code>cookies.txt</code> exported from a browser signed in to YouTube (e.g. with the "Get cookies.txt LOCALLY" extension, ideally from a private window and a secondary account). Needed when yt-dlp fails with "Sign in to confirm you're not a bot". Leave empty to not send any cookies.</div>
+                </div>
+
                 <h3>Indexing</h3>
 
                 <div class="inputContainer">
@@ -183,6 +189,7 @@
                 document.querySelector("#AutoCreateUserLibraries").checked = config.AutoCreateUserLibraries !== false;
                 document.querySelector("#YtDlpFormatOverride").value = config.YtDlpFormatOverride || "";
                 document.querySelector("#YtDlpExtraArgs").value = config.YtDlpExtraArgs || "";
+                document.querySelector("#YouTubeCookies").value = config.YouTubeCookies || "";
                 document.querySelector("#LinkCacheMinutes").value = config.LinkCacheMinutes != null ? config.LinkCacheMinutes : 300;
                 document.querySelector("#FetchVideoDetails").checked = !!config.FetchVideoDetails;
                 document.querySelector("#ShortsMaxProbeSeconds").value = config.ShortsMaxProbeSeconds != null ? config.ShortsMaxProbeSeconds : 180;
@@ -204,6 +211,7 @@
                 config.AutoCreateUserLibraries = document.querySelector("#AutoCreateUserLibraries").checked;
                 config.YtDlpFormatOverride = document.querySelector("#YtDlpFormatOverride").value;
                 config.YtDlpExtraArgs = document.querySelector("#YtDlpExtraArgs").value;
+                config.YouTubeCookies = document.querySelector("#YouTubeCookies").value;
                 config.LinkCacheMinutes = parseInt(document.querySelector("#LinkCacheMinutes").value, 10) || 300;
                 config.FetchVideoDetails = document.querySelector("#FetchVideoDetails").checked;
                 config.ShortsMaxProbeSeconds = parseInt(document.querySelector("#ShortsMaxProbeSeconds").value, 10) || 180;

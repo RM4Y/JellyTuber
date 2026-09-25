@@ -152,6 +152,7 @@ public class ShortsDetector
         psi.ArgumentList.Add(Math.Max(1, max).ToString(CultureInfo.InvariantCulture));
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add("%(id)s");
+        using var cookieFile = CookieFile.Apply(psi, Plugin.Instance?.Configuration.YouTubeCookies, _logger);
         psi.ArgumentList.Add($"https://www.youtube.com/channel/{channelId}/shorts");
 
         Process? process = null;
@@ -222,6 +223,7 @@ public class ShortsDetector
         psi.ArgumentList.Add("--skip-download");
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add("%(width)s %(height)s");
+        using var cookieFile = CookieFile.Apply(psi, Plugin.Instance?.Configuration.YouTubeCookies, _logger);
         psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
 
         Process? process = null;
