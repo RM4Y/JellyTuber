@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -36,8 +37,8 @@ internal static class FfmpegMuxer
         psi.ArgumentList.Add("-loglevel");
         psi.ArgumentList.Add("error");
 
-        AddInput(psi, videoUrl, seekSeconds);
-        AddInput(psi, audioUrl, seekSeconds);
+        AddInput(psi, ffmpegPath, videoUrl, seekSeconds);
+        AddInput(psi, ffmpegPath, audioUrl, seekSeconds);
 
         psi.ArgumentList.Add("-map");
         psi.ArgumentList.Add("0:v:0");
@@ -166,8 +167,8 @@ internal static class FfmpegMuxer
             psi.ArgumentList.Add("cuda");
         }
 
-        AddSegmenterInput(psi, videoUrl, startSeconds);
-        AddSegmenterInput(psi, audioUrl, startSeconds);
+        AddSegmenterInput(psi, ffmpegPath, videoUrl, startSeconds);
+        AddSegmenterInput(psi, ffmpegPath, audioUrl, startSeconds);
 
         psi.ArgumentList.Add("-map");
         psi.ArgumentList.Add("0:v:0");
@@ -404,8 +405,9 @@ internal static class FfmpegMuxer
             };
     }
 
-    private static void AddSegmenterInput(ProcessStartInfo psi, string url, double startSeconds)
+    private static void AddSegmenterInput(ProcessStartInfo psi, string ffmpegPath, string url, double startSeconds)
     {
+        AddChunkedReadArgs(psi, ffmpegPath);
         psi.ArgumentList.Add("-reconnect");
         psi.ArgumentList.Add("1");
         psi.ArgumentList.Add("-reconnect_streamed");
@@ -427,14 +429,79 @@ internal static class FfmpegMuxer
         psi.ArgumentList.Add(url);
     }
 
+    /// <summary>
+    /// googlevideo throttles one long-running read to roughly the video's
+    /// own bitrate - measured on a 4K25 AV1 source: a single connection
+    /// delivered 1.23x real time, which left the 4K NVENC segmenter at 1.08x
+    /// and stuttering at the slightest hiccup. Short ranged requests aren't
+    /// throttled: reading in 4 MiB chunks over one keep-alive connection
+    /// measured 50x for the download alone and 3.4x for the whole 4K
+    /// pipeline (seeking still works). <c>-request_size</c> only exists in
+    /// recent ffmpeg (jellyfin-ffmpeg 8+), and an unknown input option would
+    /// make every session fail - so it's only added once the running ffmpeg
+    /// is confirmed to list it.
+    /// </summary>
+    private static void AddChunkedReadArgs(ProcessStartInfo psi, string ffmpegPath)
+    {
+        if (!SupportsRequestSize(ffmpegPath))
+        {
+            return;
+        }
+
+        psi.ArgumentList.Add("-multiple_requests");
+        psi.ArgumentList.Add("1");
+        psi.ArgumentList.Add("-request_size");
+        psi.ArgumentList.Add(ChunkedReadRequestSize.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private const long ChunkedReadRequestSize = 4 * 1024 * 1024;
+
+    private static readonly ConcurrentDictionary<string, bool> RequestSizeSupport = new(StringComparer.Ordinal);
+
+    private static bool SupportsRequestSize(string ffmpegPath) => RequestSizeSupport.GetOrAdd(ffmpegPath, static path =>
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = path,
+                ArgumentList = { "-hide_banner", "-h", "protocol=http" },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            if (process is null)
+            {
+                return false;
+            }
+
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            var stdout = process.StandardOutput.ReadToEnd();
+            if (!process.WaitForExit(10_000))
+            {
+                process.Kill(entireProcessTree: true);
+                return false;
+            }
+
+            return (stdout + stderrTask.GetAwaiter().GetResult()).Contains("-request_size", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    });
+
     private static string FormatDuration(double seconds)
     {
         var ts = TimeSpan.FromSeconds(seconds);
         return ts.ToString(@"hh\:mm\:ss\.fff", CultureInfo.InvariantCulture);
     }
 
-    private static void AddInput(ProcessStartInfo psi, string url, double? seekSeconds)
+    private static void AddInput(ProcessStartInfo psi, string ffmpegPath, string url, double? seekSeconds)
     {
+        AddChunkedReadArgs(psi, ffmpegPath);
+
         // Tolerate brief network hiccups reading from googlevideo instead of
         // aborting the whole mux. Delay kept short so a seek doesn't sit
         // around waiting to retry - every seek already pays for a fresh
