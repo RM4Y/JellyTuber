@@ -8,6 +8,14 @@
     "category": "Channels",
     "versions": [
       {
+        "version": "1.14.1.0",
+        "targetAbi": "10.11.6.0",
+        "sourceUrl": "https://github.com/RM4Y/JellyTuber/releases/download/v1.14.1.0/jellytuber-1.14.1.0.zip",
+        "checksum": "dcd678a40a59042eba3b9a300b1f2e00",
+        "timestamp": "2026-09-25T08:26:39Z",
+        "changelog": "Release 1.14.1.0"
+      },
+      {
         "version": "1.14.0.0",
         "targetAbi": "10.11.6.0",
         "sourceUrl": "https://github.com/RM4Y/JellyTuber/releases/download/v1.14.0.0/jellytuber-1.14.0.0.zip",
