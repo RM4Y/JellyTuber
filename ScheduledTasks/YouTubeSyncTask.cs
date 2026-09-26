@@ -159,8 +159,10 @@ public class YouTubeSyncTask : IScheduledTask
                 newItems += await SyncSourceAsync(source, config, api, writer, baseAddress, precacheGate, cancellationToken)
                     .ConfigureAwait(false);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
+                // A cancelled run (e.g. a user re-queuing the sync) isn't a
+                // per-source failure - let it end the task as Cancelled.
                 _logger.LogError(ex, "Failed to sync source {Name} ({Url})", source.Name, source.Url);
             }
 
@@ -176,7 +178,7 @@ public class YouTubeSyncTask : IScheduledTask
             expectedRoots.AddRange(videoRoots);
             newItems += videoWrites;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogError(ex, "Failed to sync user-added videos");
         }
@@ -262,15 +264,15 @@ public class YouTubeSyncTask : IScheduledTask
         }
 
         // How many of the most recent videos this channel should keep,
-        // clamped to the 10-50 range regardless of what's stored in config
+        // clamped to the 5-50 range regardless of what's stored in config
         // (older values, or bad user input, could be outside it).
         var maxVideos = ClampMaxVideos(source.MaxVideos);
 
         // Fetch a buffer beyond maxVideos since Shorts get filtered out
         // afterwards; without it a channel full of Shorts could come up
-        // short of the requested count. Capped so a single source can never
-        // blow the API quota.
-        var fetchLimit = Math.Min(200, maxVideos * 4);
+        // short of the requested count (Amixem: 86 Shorts in its last 100
+        // uploads). Capped so a single source can never blow the API quota.
+        var fetchLimit = Math.Min(400, maxVideos * 8);
 
         // Resolve the playlist id we'll enumerate.
         string playlistId;
@@ -301,6 +303,12 @@ public class YouTubeSyncTask : IScheduledTask
         }
 
         var videos = await api.GetPlaylistVideosAsync(playlistId, fetchLimit, ct).ConfigureAwait(false);
+
+        // The window of uploads this sync actually saw, for the cleanup at
+        // the end: a video older than it is unknown, not gone. A short page
+        // means the whole playlist was covered.
+        var fetchedCount = videos.Count;
+        DateTime? windowStartUtc = fetchedCount >= fetchLimit ? videos.Min(v => v.PublishedAt) : null;
         _logger.LogInformation("Source {Name}: {Count} candidate videos fetched", source.Name, videos.Count);
 
         // Merge any duplicate folders left over from title changes before this
@@ -331,7 +339,7 @@ public class YouTubeSyncTask : IScheduledTask
             {
                 try
                 {
-                    var tabShorts = await shorts.ListChannelShortIdsAsync(channelId, 200, ct).ConfigureAwait(false);
+                    var tabShorts = await shorts.ListChannelShortIdsAsync(channelId, fetchLimit, ct).ConfigureAwait(false);
                     if (tabShorts.Count > 0)
                     {
                         // Delete any Short already written (e.g. exclusion was
@@ -348,7 +356,7 @@ public class YouTubeSyncTask : IScheduledTask
                             source.Name, beforeTab - videos.Count, tabShorts.Count);
                     }
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     _logger.LogWarning(ex, "Channel Shorts-tab filtering failed for {Name}", source.Name);
                 }
@@ -408,8 +416,12 @@ public class YouTubeSyncTask : IScheduledTask
             }
         }
 
-        // Trim down to the requested count now that Shorts are out of the way
-        // (still newest-first here, so this keeps the most recent N).
+        // Trim down to the requested count now that Shorts are out of the way.
+        // Newest by publish date - the same order CleanupExcessVideos keeps
+        // by below - not playlist order: the two differ (premieres,
+        // scheduled uploads), and the mismatch made one video get written,
+        // precached, then deleted again by retention on every single sync.
+        videos = videos.OrderByDescending(v => v.PublishedAt).ToList();
         if (videos.Count > maxVideos)
         {
             videos = videos.Take(maxVideos).ToList();
@@ -442,6 +454,19 @@ public class YouTubeSyncTask : IScheduledTask
         }
 
         _logger.LogInformation("Source {Name}: {Written} new videos written", source.Name, written);
+
+        // Drop folders for videos inside the fetched window that are no
+        // longer among the ones kept above: deleted or made private on
+        // YouTube (unplayable anyway), or now detected as a Short. Left in
+        // place, such a video kept one of the N slots, so the retention pass
+        // below evicted the Nth real video - which the next sync then wrote
+        // again, forever. Older videos outside the window are left to the
+        // count-based retention. Skipped if the API returned nothing, so a
+        // bad fetch can't empty a channel.
+        if (fetchedCount > 0)
+        {
+            writer.CleanupRemovedVideos(sourceRoot, videos.Select(v => v.VideoId).ToHashSet(StringComparer.Ordinal), windowStartUtc);
+        }
 
         // Enforce the keep-last-N-videos limit: prunes anything that aged out
         // of the window, and shrinks the library if the limit was lowered.
@@ -783,7 +808,7 @@ public class YouTubeSyncTask : IScheduledTask
         return m.Success ? m.Groups[1].Value : null;
     }
 
-    /// <summary>Clamps a channel's "keep last N videos" setting to 10-50; 0/unset falls back to 25.</summary>
+    /// <summary>Clamps a channel's "keep last N videos" setting to 5-50; 0/unset falls back to 25.</summary>
     private static int ClampMaxVideos(int value)
     {
         if (value <= 0)
@@ -791,7 +816,7 @@ public class YouTubeSyncTask : IScheduledTask
             value = 25;
         }
 
-        return Math.Clamp(value, 10, 50);
+        return Math.Clamp(value, 5, 50);
     }
 
     private static string SanitizeUser(string name) => PathSafety.Segment(name, "user");

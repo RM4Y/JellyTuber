@@ -91,11 +91,15 @@ internal static class PageHtml
   .shorts.on { border-color:var(--accent); background:var(--glow); color:var(--accent); }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--text-dim); }
   .shorts.on .dot { background:var(--accent); box-shadow:0 0 8px var(--accent); }
-  .maxvid { display:flex; align-items:center; gap:7px; padding:5px 7px; border-radius:999px;
+  .maxvid { display:flex; align-items:center; gap:6px; padding:4px 5px 4px 12px; border-radius:999px;
     border:1px solid var(--border); background:transparent; flex:none; }
   .maxvid span { font-size:12.5px; font-weight:600; color:var(--text-dim); white-space:nowrap; }
-  .maxvid input[type=range] { width:74px; accent-color:var(--accent); }
-  .maxvid b { font-size:12.5px; font-weight:700; color:var(--accent); min-width:1.6em; text-align:right; }
+  .maxvid button { width:26px; height:26px; border-radius:50%; border:1px solid var(--border);
+    background:var(--bg-elev2); color:var(--text); font-family:inherit; font-size:15px; font-weight:700;
+    line-height:1; cursor:pointer; padding:0; display:flex; align-items:center; justify-content:center; }
+  .maxvid button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  .maxvid button:disabled { opacity:.35; cursor:default; }
+  .maxvid b { font-size:13px; font-weight:700; color:var(--accent); min-width:1.6em; text-align:center; }
   .remove { padding:8px 14px; border-radius:10px; border:1px solid var(--border); background:transparent;
     color:var(--text-dim); font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; flex:none; }
   .remove:hover { border-color:#e0738a; color:#e0738a; }
@@ -412,14 +416,31 @@ internal static class PageHtml
         card.appendChild(nm);
 
         var mv = document.createElement("div"); mv.className = "maxvid";
-        mv.innerHTML = '<span>Vidéos</span><input type="range" min="10" max="50" step="1" value="' + maxVideos + '" /><b>' + maxVideos + '</b>';
-        var mvRange = mv.querySelector("input"), mvVal = mv.querySelector("b");
-        mvRange.addEventListener("input", function () { mvVal.textContent = mvRange.value; });
-        mvRange.addEventListener("change", function () {
-          var n = parseInt(mvRange.value, 10);
-          api("/JellyTuber/User/SetMaxVideos", { method: "POST", body: JSON.stringify({ channelId: cid, maxVideos: n }) })
-            .then(function () { toast("Limite mise à jour : " + n + " vidéos."); });
-        });
+        mv.innerHTML = '<span>Vidéos</span><button type="button" aria-label="Moins de vidéos">−</button><b></b><button type="button" aria-label="Plus de vidéos">+</button>';
+        (function (minus, val, plus) {
+          var MIN = 5, MAX = 50, STEP = 5, saveTimer = null;
+          function render() {
+            val.textContent = maxVideos;
+            minus.disabled = maxVideos <= MIN; plus.disabled = maxVideos >= MAX;
+          }
+          // Snap to the step grid (a value saved as e.g. 23 goes to 20 / 25),
+          // and only save once the clicks stop: every save re-queues a sync.
+          function change(dir) {
+            maxVideos = dir > 0
+              ? Math.min(MAX, (Math.floor(maxVideos / STEP) + 1) * STEP)
+              : Math.max(MIN, (Math.ceil(maxVideos / STEP) - 1) * STEP);
+            render();
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(function () {
+              var n = maxVideos;
+              api("/JellyTuber/User/SetMaxVideos", { method: "POST", body: JSON.stringify({ channelId: cid, maxVideos: n }) })
+                .then(function () { toast("Limite mise à jour : " + n + " vidéos."); });
+            }, 800);
+          }
+          minus.addEventListener("click", function () { change(-1); });
+          plus.addEventListener("click", function () { change(1); });
+          render();
+        })(mv.querySelectorAll("button")[0], mv.querySelector("b"), mv.querySelectorAll("button")[1]);
         card.appendChild(mv);
 
         var sh = document.createElement("button"); sh.className = "shorts" + (ex ? " on" : "");

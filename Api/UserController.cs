@@ -332,7 +332,7 @@ self.addEventListener("fetch", function (e) {
         }
 
         var cfg = Plugin.Instance!.Configuration;
-        var maxVideos = Math.Clamp(req.MaxVideos, 10, 50);
+        var maxVideos = Math.Clamp(req.MaxVideos, 5, 50);
         lock (Plugin.ConfigLock)
         {
             var entry = cfg.UserChannels.FirstOrDefault(c => IsUser(c.UserId, userId) && c.ChannelId == req.ChannelId);

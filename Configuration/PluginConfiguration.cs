@@ -36,7 +36,7 @@ public class SourceItem
 
     /// <summary>
     /// How many of the most recent videos to keep in the library for this
-    /// channel/playlist. Clamped to 10-50 at sync time. Older videos beyond
+    /// channel/playlist. Clamped to 5-50 at sync time. Older videos beyond
     /// this count are pruned from disk.
     /// </summary>
     public int MaxVideos { get; set; } = 25;
@@ -187,7 +187,7 @@ public class UserChannel
 
     /// <summary>
     /// How many of the most recent videos to keep in the library for this
-    /// channel. User-editable on the self-service page, clamped to 10-50.
+    /// channel. User-editable on the self-service page, clamped to 5-50.
     /// </summary>
     public int MaxVideos { get; set; } = 25;
 }

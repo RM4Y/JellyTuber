@@ -465,9 +465,14 @@ public class LibraryWriter
     /// <summary>
     /// Removes video folders under <paramref name="channelRoot"/> whose stored
     /// video id is not in <paramref name="keepVideoIds"/>. Used to delete
-    /// individually-added videos once a user removes them from their list.
+    /// individually-added videos once a user removes them from their list,
+    /// and channel videos that dropped out of the kept set (deleted/private
+    /// on YouTube, or now a Short). With <paramref name="onlyPublishedSinceUtc"/>,
+    /// videos published before it are left alone: the sync only sees a
+    /// window of recent uploads, and an older video outside it is simply
+    /// unknown, not gone - retention by count is what ages those out.
     /// </summary>
-    public void CleanupRemovedVideos(string channelRoot, ISet<string> keepVideoIds)
+    public void CleanupRemovedVideos(string channelRoot, ISet<string> keepVideoIds, DateTime? onlyPublishedSinceUtc = null)
     {
         if (!Directory.Exists(channelRoot))
         {
@@ -480,6 +485,14 @@ public class LibraryWriter
             {
                 var parts = File.ReadAllText(marker).Split('|');
                 var id = parts.Length > 0 ? parts[0] : string.Empty;
+                if (onlyPublishedSinceUtc is { } since
+                    && (parts.Length < 2
+                        || !DateTime.TryParse(parts[1], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var published)
+                        || published.ToUniversalTime() < since))
+                {
+                    continue;
+                }
+
                 if (!string.IsNullOrEmpty(id) && !keepVideoIds.Contains(id))
                 {
                     var dir = Path.GetDirectoryName(marker);

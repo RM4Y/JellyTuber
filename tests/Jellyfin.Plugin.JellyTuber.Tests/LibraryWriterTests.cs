@@ -91,6 +91,20 @@ public sealed class LibraryWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task Window_cleanup_removes_gone_videos_but_keeps_older_ones_outside_the_window()
+    {
+        var chan = Path.Combine(_root, "Chan");
+        await Write(chan, Video("OLDOLDOLDOL", "Old but valid", 1), 1);   // before the window
+        await Write(chan, Video("GONEGONEGON", "Deleted on YouTube", 10), 2);
+        await Write(chan, Video("KEEPKEEPKEE", "Kept", 12), 3);
+
+        var keep = new HashSet<string> { "KEEPKEEPKEE" };
+        _writer.CleanupRemovedVideos(chan, keep, new DateTime(2026, 1, 5, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.Equal(new[] { "Kept", "Old but valid" }, Directory.GetDirectories(chan).Select(Path.GetFileName).Order());
+    }
+
+    [Fact]
     public async Task Dot_titles_stay_inside_the_channel_folder()
     {
         var chan = Path.Combine(_root, "Chan");
