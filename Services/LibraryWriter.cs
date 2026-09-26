@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml;
 using Jellyfin.Plugin.JellyTuber.Configuration;
 using Jellyfin.Plugin.JellyTuber.YouTube;
 using Microsoft.Extensions.Logging;
@@ -47,77 +48,47 @@ public class LibraryWriter
     }
 
     /// <summary>
-    /// Rewrites just the .nfo (and re-downloads the thumbnail if missing) for a
-    /// video folder that already exists. Used to backfill metadata (e.g. the
-    /// description) onto videos written before that data was captured. No-op if
-    /// the folder isn't there yet.
-    /// </summary>
-    public async Task RefreshVideoNfoAsync(
-        string sourceRoot,
-        SourceItem source,
-        YouTubeVideo video,
-        int episodeNumber,
-        CancellationToken ct)
-    {
-        var safeTitle = Sanitize(video.Title);
-        var videoDir = Path.Combine(sourceRoot, safeTitle);
-        if (!Directory.Exists(videoDir))
-        {
-            return;
-        }
-
-        var isSeries = !string.Equals(source.Mode, "Movies", StringComparison.OrdinalIgnoreCase);
-        var nfo = isSeries
-            ? BuildEpisodeNfo(video, video.PublishedAt.Year, episodeNumber)
-            : BuildMovieNfo(video);
-        await File.WriteAllTextAsync(Path.Combine(videoDir, safeTitle + ".nfo"), nfo, ct).ConfigureAwait(false);
-
-        if (!string.IsNullOrEmpty(video.ThumbnailUrl))
-        {
-            await DownloadAsync(video.ThumbnailUrl, Path.Combine(videoDir, safeTitle + ".jpg"), ct).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
     /// Deletes a previously-written video folder if it exists. Used to remove
     /// Shorts that were imported before the source started excluding them.
-    /// Returns true if something was deleted. When <paramref name="videoIndex"/>
-    /// is supplied, the folder is located by video id (so it's found even if the
-    /// title changed since it was written); otherwise it falls back to the
-    /// current title.
+    /// Returns true if something was deleted. The folder is located by video
+    /// id (via <paramref name="videoIndex"/>, so it's found even if the title
+    /// changed since it was written), or else by title - but only ever
+    /// deleted if its own marker says it's THIS video, never another video
+    /// that happens to share the title.
     /// </summary>
     public bool RemoveVideoIfExists(
         string sourceRoot,
-        SourceItem source,
         YouTubeVideo video,
         IDictionary<string, string>? videoIndex = null)
     {
-        string videoDir;
-        if (videoIndex is not null
-            && videoIndex.TryGetValue(video.VideoId, out var existingDir)
-            && Directory.Exists(existingDir))
+        var candidates = new List<string>();
+        if (videoIndex is not null && videoIndex.TryGetValue(video.VideoId, out var existingDir))
         {
-            videoDir = existingDir;
-        }
-        else
-        {
-            videoDir = Path.Combine(sourceRoot, Sanitize(video.Title));
+            candidates.Add(existingDir);
         }
 
-        try
+        candidates.Add(Path.Combine(sourceRoot, Sanitize(video.Title)));
+        candidates.Add(Path.Combine(sourceRoot, DisambiguatedName(video)));
+
+        foreach (var videoDir in candidates)
         {
-            if (Directory.Exists(videoDir))
+            try
             {
-                Directory.Delete(videoDir, recursive: true);
-                VideoCache.Delete(video.VideoId);
-                _logger.LogInformation("Removed Short folder: {Dir}", videoDir);
-                videoIndex?.Remove(video.VideoId);
-                return true;
+                if (Directory.Exists(videoDir)
+                    && PathSafety.IsStrictlyInside(videoDir, sourceRoot)
+                    && ReadMarkerId(videoDir) == video.VideoId)
+                {
+                    Directory.Delete(videoDir, recursive: true);
+                    VideoCache.Delete(video.VideoId);
+                    _logger.LogInformation("Removed Short folder: {Dir}", videoDir);
+                    videoIndex?.Remove(video.VideoId);
+                    return true;
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to remove Short folder {Dir}", videoDir);
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to remove Short folder {Dir}", videoDir);
+            }
         }
 
         return false;
@@ -144,7 +115,7 @@ public class LibraryWriter
             {
                 var id = File.ReadAllText(marker).Split('|')[0];
                 var dir = Path.GetDirectoryName(marker);
-                if (!string.IsNullOrEmpty(id) && dir is not null)
+                if (!string.IsNullOrEmpty(id) && dir is not null && PathSafety.IsStrictlyInside(dir, sourceRoot))
                 {
                     index[id] = dir;
                 }
@@ -181,7 +152,7 @@ public class LibraryWriter
                 var parts = File.ReadAllText(marker).Split('|');
                 var id = parts.Length > 0 ? parts[0] : string.Empty;
                 var dir = Path.GetDirectoryName(marker);
-                if (string.IsNullOrEmpty(id) || dir is null)
+                if (string.IsNullOrEmpty(id) || dir is null || !PathSafety.IsStrictlyInside(dir, sourceRoot))
                 {
                     continue;
                 }
@@ -282,41 +253,42 @@ public class LibraryWriter
         IDictionary<string, string>? videoIndex,
         CancellationToken ct)
     {
-        var safeTitle = Sanitize(video.Title);
+        var safeTitle = VideoFolderName(sourceRoot, video, videoIndex);
         var videoDir = Path.Combine(sourceRoot, safeTitle);
         var isSeries = !string.Equals(source.Mode, "Movies", StringComparison.OrdinalIgnoreCase);
 
-        var renamed = false;
         if (videoIndex is not null
             && videoIndex.TryGetValue(video.VideoId, out var existingDir)
             && !string.Equals(Normalize(existingDir), Normalize(videoDir), StringComparison.OrdinalIgnoreCase)
-            && Directory.Exists(existingDir))
+            && Directory.Exists(existingDir)
+            && RenameVideoFolder(existingDir, videoDir, safeTitle))
         {
-            renamed = RenameVideoFolder(existingDir, videoDir, safeTitle);
-            if (renamed)
-            {
-                videoIndex[video.VideoId] = videoDir;
-            }
+            videoIndex[video.VideoId] = videoDir;
         }
 
         var strmPath = Path.Combine(videoDir, safeTitle + ".strm");
         var markerPath = Path.Combine(videoDir, VideoMarker);
+        var nfoPath = Path.Combine(videoDir, safeTitle + ".nfo");
+        var nfo = isSeries
+            ? BuildEpisodeNfo(video, video.PublishedAt.Year, episodeNumber)
+            : BuildMovieNfo(video);
 
-        if (!renamed && File.Exists(strmPath) && File.Exists(markerPath))
+        if (File.Exists(strmPath) && File.Exists(markerPath))
         {
-            return false; // already synced
-        }
+            // Already synced (possibly just renamed for a title change).
+            // Keep what can drift in step: the .nfo (title/description, and
+            // the episode number, which shifts as the keep-last-N window
+            // slides) and the .strm (JellyfinAddress may have changed). Only
+            // rewritten when different, so an idle sync doesn't touch mtimes
+            // and trigger needless Jellyfin rescans.
+            await WriteIfChangedAsync(nfoPath, nfo, ct).ConfigureAwait(false);
+            await WriteIfChangedAsync(strmPath, strmTarget, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(video.ThumbnailUrl))
+            {
+                await DownloadAsync(video.ThumbnailUrl, Path.Combine(videoDir, safeTitle + ".jpg"), ct).ConfigureAwait(false);
+            }
 
-        if (renamed && File.Exists(strmPath) && File.Exists(markerPath))
-        {
-            // Title changed: folder was renamed above, just refresh the .nfo
-            // so the displayed title matches (episode number may have shifted
-            // too, since renumbering is chronological).
-            var refreshedNfo = isSeries
-                ? BuildEpisodeNfo(video, video.PublishedAt.Year, episodeNumber)
-                : BuildMovieNfo(video);
-            await File.WriteAllTextAsync(Path.Combine(videoDir, safeTitle + ".nfo"), refreshedNfo, ct).ConfigureAwait(false);
-            return false; // not a new video, just relocated
+            return false;
         }
 
         Directory.CreateDirectory(videoDir);
@@ -327,11 +299,6 @@ public class LibraryWriter
             $"{video.VideoId}|{video.PublishedAt.ToString("o", CultureInfo.InvariantCulture)}",
             ct).ConfigureAwait(false);
 
-        // NFO ({Title}.nfo)
-        var nfoPath = Path.Combine(videoDir, safeTitle + ".nfo");
-        var nfo = isSeries
-            ? BuildEpisodeNfo(video, video.PublishedAt.Year, episodeNumber)
-            : BuildMovieNfo(video);
         await File.WriteAllTextAsync(nfoPath, nfo, ct).ConfigureAwait(false);
 
         // Thumbnail ({Title}.jpg)
@@ -341,6 +308,60 @@ public class LibraryWriter
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The folder (and file) name for <paramref name="video"/>: its title, or
+    /// "{title} [{videoId}]" when a DIFFERENT video already owns the plain
+    /// title folder - otherwise two videos with the same title ("Live",
+    /// "Podcast #...", "Private video") shared one folder and the second was
+    /// silently treated as already synced. A video keeps the folder it already
+    /// has if that's still one of its two valid names, so existing folders
+    /// are never renamed just because of this.
+    /// </summary>
+    private static string VideoFolderName(string sourceRoot, YouTubeVideo video, IDictionary<string, string>? videoIndex)
+    {
+        var plain = Sanitize(video.Title);
+        var disambiguated = DisambiguatedName(video);
+
+        if (videoIndex is not null && videoIndex.TryGetValue(video.VideoId, out var existingDir))
+        {
+            var existingName = Path.GetFileName(existingDir);
+            if (existingName == plain || existingName == disambiguated)
+            {
+                return existingName;
+            }
+        }
+
+        var plainDir = Path.Combine(sourceRoot, plain);
+        var owner = Directory.Exists(plainDir) ? ReadMarkerId(plainDir) : null;
+        return owner is null || owner == video.VideoId ? plain : disambiguated;
+    }
+
+    private static string DisambiguatedName(YouTubeVideo video) => Sanitize(video.Title) + " [" + video.VideoId + "]";
+
+    /// <summary>The video id recorded in <paramref name="videoDir"/>'s .ytmeta marker, or null if there's none.</summary>
+    private static string? ReadMarkerId(string videoDir)
+    {
+        try
+        {
+            var marker = Path.Combine(videoDir, VideoMarker);
+            return File.Exists(marker) ? File.ReadAllText(marker).Split('|')[0] : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task WriteIfChangedAsync(string path, string content, CancellationToken ct)
+    {
+        if (File.Exists(path) && await File.ReadAllTextAsync(path, ct).ConfigureAwait(false) == content)
+        {
+            return;
+        }
+
+        await File.WriteAllTextAsync(path, content, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -366,7 +387,7 @@ public class LibraryWriter
             {
                 var parts = File.ReadAllText(marker).Split('|');
                 var dir = Path.GetDirectoryName(marker);
-                if (dir is null || parts.Length < 2)
+                if (dir is null || parts.Length < 2 || !PathSafety.IsStrictlyInside(dir, sourceRoot))
                 {
                     continue;
                 }
@@ -412,7 +433,7 @@ public class LibraryWriter
     /// passes over the whole library, like the precache backfill task, that
     /// need every video id rather than one channel folder's worth.
     /// </summary>
-    public IEnumerable<string> ListAllVideoIds(string rootFolder)
+    public static IEnumerable<string> ListAllVideoIds(string rootFolder)
     {
         if (!Directory.Exists(rootFolder))
         {
@@ -462,7 +483,7 @@ public class LibraryWriter
                 if (!string.IsNullOrEmpty(id) && !keepVideoIds.Contains(id))
                 {
                     var dir = Path.GetDirectoryName(marker);
-                    if (dir is not null && Directory.Exists(dir))
+                    if (dir is not null && PathSafety.IsStrictlyInside(dir, channelRoot) && Directory.Exists(dir))
                     {
                         Directory.Delete(dir, recursive: true);
                         VideoCache.Delete(id);
@@ -511,7 +532,10 @@ public class LibraryWriter
             foreach (var marker in Directory.EnumerateFiles(scanRoot, ChannelMarker, SearchOption.AllDirectories))
             {
                 var channelDir = Path.GetDirectoryName(marker);
-                if (channelDir is null)
+                // A marker sitting at the scan root itself (left by an older
+                // version that let a ".." name resolve upwards) would delete
+                // the whole library - never touch anything but a subfolder.
+                if (channelDir is null || !PathSafety.IsStrictlyInside(channelDir, scanRoot))
                 {
                     continue;
                 }
@@ -673,24 +697,43 @@ public class LibraryWriter
         }
     }
 
-    private static string Esc(string s) =>
-        s.Replace("&", "&amp;")
-         .Replace("<", "&lt;")
-         .Replace(">", "&gt;");
+    /// <summary>
+    /// XML-escapes <paramref name="s"/> and drops characters XML 1.0 can't
+    /// hold at all (control characters YouTube descriptions sometimes
+    /// contain) - left in, they make the whole .nfo unparseable.
+    /// </summary>
+    internal static string Esc(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                sb.Append(c).Append(s[++i]);
+                continue;
+            }
+
+            if (!XmlConvert.IsXmlChar(c))
+            {
+                continue;
+            }
+
+            switch (c)
+            {
+                case '&': sb.Append("&amp;"); break;
+                case '<': sb.Append("&lt;"); break;
+                case '>': sb.Append("&gt;"); break;
+                default: sb.Append(c); break;
+            }
+        }
+
+        return sb.ToString();
+    }
 
     private static string Sanitize(string name)
     {
-        foreach (var c in Path.GetInvalidFileNameChars())
-        {
-            name = name.Replace(c, '_');
-        }
-
-        name = name.Replace(":", "_").Replace("/", "_").Replace("\\", "_").Trim();
-        if (name.Length > 120)
-        {
-            name = name.Substring(0, 120).Trim();
-        }
-
-        return string.IsNullOrWhiteSpace(name) ? "video" : name;
+        var safe = PathSafety.Segment(name, "video");
+        return safe.Length > 120 ? PathSafety.Segment(safe.Substring(0, 120), "video") : safe;
     }
 }

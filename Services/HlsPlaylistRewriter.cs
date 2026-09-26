@@ -24,7 +24,7 @@ internal static class HlsPlaylistRewriter
 
     /// <summary>
     /// Returns <paramref name="playlist"/> with every URI line (and every
-    /// EXT-X-MAP/EXT-X-KEY URI="..." attribute) replaced by
+    /// tag's URI="..." attribute) replaced by
     /// <paramref name="proxyUrl"/>(absolute original URI). Relative URIs are
     /// resolved against <paramref name="baseUri"/> (the manifest's own URL)
     /// first.
@@ -43,8 +43,11 @@ internal static class HlsPlaylistRewriter
 
             if (line[0] == '#')
             {
-                if (line.StartsWith("#EXT-X-MAP", StringComparison.Ordinal)
-                    || line.StartsWith("#EXT-X-KEY", StringComparison.Ordinal))
+                // Any tag with a URI attribute: EXT-X-MAP/KEY in media
+                // playlists, but also EXT-X-MEDIA (alternate audio renditions)
+                // and EXT-X-I-FRAME-STREAM-INF in a master playlist - left
+                // pointing at googlevideo, a remote client gets a 403 on them.
+                if (line.Contains("URI=\"", StringComparison.Ordinal))
                 {
                     lines[i] = UriAttribute.Replace(
                         line,

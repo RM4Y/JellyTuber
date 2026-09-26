@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
@@ -78,6 +79,9 @@ public class PlaybackResolver
     /// <summary>Once the cache grows past this many entries, expired ones are swept out.</summary>
     private const int CacheSweepThreshold = 500;
 
+    /// <summary>Hard ceiling on one yt-dlp run; it's killed past this instead of lingering.</summary>
+    private static readonly TimeSpan YtDlpTimeout = TimeSpan.FromSeconds(60);
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger _logger;
 
@@ -96,7 +100,7 @@ public class PlaybackResolver
             return cached.Stream;
         }
 
-        var resolved = await RunYtDlpAsync(config, videoId, ct).ConfigureAwait(false);
+        var resolved = await RunYtDlpInfoAsync(config, videoId, ct).ConfigureAwait(false);
 
         if (resolved is not null)
         {
@@ -162,34 +166,26 @@ public class PlaybackResolver
         // without this every SAME-NETWORK play of such a video re-paid this
         // ~2s yt-dlp manifest probe forever, on every single play, never
         // just once. A `null` cache hit means "confirmed no manifest," and
-        // is returned exactly like a fresh negative result would be.
+        // is returned exactly like a fresh negative result would be. A run
+        // cut short by the request going away proved nothing, though.
+        if (ct.IsCancellationRequested)
+        {
+            return url;
+        }
+
         DirectCache[videoId] = new CacheEntry<string?>
         {
             Value = url,
             ExpiresUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, config.LinkCacheMinutes))
         };
 
+        SweepExpiredIfLarge();
+
         return url;
     }
 
     private async Task<string?> RunYtDlpDirectAsync(PluginConfiguration config, string videoId, CancellationToken ct)
     {
-        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
-        if (ytDlpPath is null)
-        {
-            _logger.LogError("yt-dlp is not available (download failed); cannot resolve {VideoId}", videoId);
-            return null;
-        }
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = ytDlpPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
         // Select an HLS format, then print ITS master manifest URL (shared by
         // all variants) rather than a single variant. The client then does
         // adaptive bitrate up to the best H.264 variant on its own.
@@ -205,103 +201,44 @@ public class PlaybackResolver
         // always, per this method's own doc comment about combined HLS being
         // rare. This is what was making same-network playback look "blurry"/
         // broken across the board, not a quality tradeoff.
-        psi.ArgumentList.Add("--print");
-        psi.ArgumentList.Add("%(manifest_url)s");
-        psi.ArgumentList.Add("-f");
-        psi.ArgumentList.Add("b[protocol^=m3u8][acodec!=none]");
-
-        psi.ArgumentList.Add("--no-playlist");
-        psi.ArgumentList.Add("--no-warnings");
-        psi.ArgumentList.Add("--socket-timeout");
-        psi.ArgumentList.Add("15");
-
-        try
+        var stdout = await RunYtDlpAsync(
+            config,
+            videoId,
+            "HLS manifest",
+            new[] { "--print", "%(manifest_url)s", "-f", "b[protocol^=m3u8][acodec!=none]" },
+            ct).ConfigureAwait(false);
+        if (stdout is null)
         {
-            var cacheDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "jellyfin-ytdlp-cache");
-            System.IO.Directory.CreateDirectory(cacheDir);
-            psi.ArgumentList.Add("--cache-dir");
-            psi.ArgumentList.Add(cacheDir);
-        }
-        catch
-        {
-            // ignore - fall back to yt-dlp's default cache location
-        }
-
-        var denoPath = await ExternalTools.EnsureDenoAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
-        if (denoPath is not null)
-        {
-            psi.ArgumentList.Add("--js-runtimes");
-            psi.ArgumentList.Add($"deno:{denoPath}");
-        }
-
-        foreach (var arg in ExternalTools.StripJsRuntimesArg(config.YtDlpExtraArgs))
-        {
-            psi.ArgumentList.Add(arg);
-        }
-
-        using var cookieFile = CookieFile.Apply(psi, config.YouTubeCookies, _logger);
-        psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
-
-        try
-        {
-            using var process = new Process { StartInfo = psi };
-            process.Start();
-
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-            var stderrTask = process.StandardError.ReadToEndAsync(ct);
-            await process.WaitForExitAsync(ct).ConfigureAwait(false);
-
-            var stdout = await stdoutTask.ConfigureAwait(false);
-            var stderr = await stderrTask.ConfigureAwait(false);
-
-            if (process.ExitCode != 0)
-            {
-                _logger.LogWarning("yt-dlp (HLS manifest) failed for {VideoId}: {Error}", videoId, stderr.Trim());
-                CookieFile.ReportBotCheck(stderr, config.YouTubeCookies, _logger);
-                return null;
-            }
-
-            // First non-empty http(s) line is the playable URL / manifest.
-            string? manifestUrl = null;
-            foreach (var line in stdout.Split('\n'))
-            {
-                var trimmed = line.Trim();
-                if (trimmed.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                {
-                    manifestUrl = trimmed;
-                    break;
-                }
-            }
-
-            if (manifestUrl is null)
-            {
-                return null;
-            }
-
-            if (await HasAmbiguousAudioLanguageAsync(manifestUrl, videoId, ct).ConfigureAwait(false))
-            {
-                // Multiple audio languages (e.g. an auto-dub) with no track
-                // marked DEFAULT=YES - which one plays is then entirely up to
-                // the player's own tie-break (often just "whichever is listed
-                // first"), and that's frequently the dub, not the original.
-                // We can't rewrite this manifest ourselves since the caller
-                // redirects the client straight to it without passing back
-                // through us - falling back to the DASH pipeline instead,
-                // whose format selector (see BuildFormat) reliably honours
-                // yt-dlp's own original-vs-dub language_preference.
-                _logger.LogInformation(
-                    "Skipping direct HLS redirect for {VideoId}: manifest exposes multiple audio languages with no explicit default (would let the player pick, e.g. a dub instead of the original) - falling back to the DASH pipeline",
-                    videoId);
-                return null;
-            }
-
-            return manifestUrl;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to launch yt-dlp at '{Path}'", ytDlpPath);
             return null;
         }
+
+        // First non-empty http(s) line is the playable URL / manifest.
+        var manifestUrl = stdout.Split('\n')
+            .Select(l => l.Trim())
+            .FirstOrDefault(l => l.StartsWith("http", StringComparison.OrdinalIgnoreCase));
+        if (manifestUrl is null)
+        {
+            return null;
+        }
+
+        if (await HasAmbiguousAudioLanguageAsync(manifestUrl, videoId, ct).ConfigureAwait(false))
+        {
+            // Multiple audio languages (e.g. an auto-dub) with no track
+            // marked DEFAULT=YES - which one plays is then entirely up to
+            // the player's own tie-break (often just "whichever is listed
+            // first"), and that's frequently the dub, not the original.
+            // We can't rewrite this manifest ourselves since the caller
+            // redirects the client straight to it without passing back
+            // through us - falling back to the DASH pipeline instead,
+            // whose format selector (see BuildFormat) reliably honours
+            // yt-dlp's own original-vs-dub language_preference.
+            _logger.LogInformation(
+                "Skipping direct HLS redirect for {VideoId}: manifest exposes multiple audio languages with no explicit default (would let the player pick, e.g. a dub instead of the original) - falling back to the DASH pipeline",
+                videoId);
+            return null;
+        }
+
+        return manifestUrl;
     }
 
     private static readonly Regex AudioLanguageRegex = new("LANGUAGE=\"([^\"]+)\"", RegexOptions.Compiled);
@@ -359,22 +296,51 @@ public class PlaybackResolver
 
     private static void SweepExpiredIfLarge()
     {
-        if (Cache.Count <= CacheSweepThreshold)
+        var now = DateTime.UtcNow;
+        if (Cache.Count > CacheSweepThreshold)
         {
-            return;
+            foreach (var kvp in Cache)
+            {
+                if (kvp.Value.ExpiresUtc <= now)
+                {
+                    Cache.TryRemove(kvp.Key, out _);
+                }
+            }
         }
 
-        var now = DateTime.UtcNow;
-        foreach (var kvp in Cache)
+        if (DirectCache.Count > CacheSweepThreshold)
         {
-            if (kvp.Value.ExpiresUtc <= now)
+            foreach (var kvp in DirectCache)
             {
-                Cache.TryRemove(kvp.Key, out _);
+                if (kvp.Value.ExpiresUtc <= now)
+                {
+                    DirectCache.TryRemove(kvp.Key, out _);
+                }
             }
         }
     }
 
-    private async Task<ResolvedStream?> RunYtDlpAsync(PluginConfiguration config, string videoId, CancellationToken ct)
+    private async Task<ResolvedStream?> RunYtDlpInfoAsync(PluginConfiguration config, string videoId, CancellationToken ct)
+    {
+        // -j dumps the resolved format info as JSON instead of downloading -
+        // gives us the URL(s) for the selected format PLUS duration/filesize,
+        // which we need to approximate seek offsets when muxing on the fly.
+        //
+        // NOTE: we deliberately do NOT force the iOS player client. YouTube now
+        // gates its iOS HTTPS formats behind a GVS PO token, so those formats get
+        // skipped and resolution fails. The default client already exposes
+        // DASH formats up to 4K/8K that resolve cleanly.
+        var stdout = await RunYtDlpAsync(config, videoId, "resolve", new[] { "-j", "-f", BuildFormat(config) }, ct).ConfigureAwait(false);
+        return stdout is null ? null : ParseInfo(stdout, videoId);
+    }
+
+    /// <summary>
+    /// Runs yt-dlp for <paramref name="videoId"/> with <paramref name="modeArgs"/>
+    /// plus everything every call shares (speed flags, persistent cache dir,
+    /// bundled Deno, the admin's extra args, cookies). Returns stdout, or
+    /// null on any failure - logged here, including the bot-check hint.
+    /// </summary>
+    private async Task<string?> RunYtDlpAsync(PluginConfiguration config, string videoId, string purpose, IEnumerable<string> modeArgs, CancellationToken ct)
     {
         var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
         if (ytDlpPath is null)
@@ -383,26 +349,11 @@ public class PlaybackResolver
             return null;
         }
 
-        var psi = new ProcessStartInfo
+        var psi = new ProcessStartInfo { FileName = ytDlpPath };
+        foreach (var arg in modeArgs)
         {
-            FileName = ytDlpPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        // -j dumps the resolved format info as JSON instead of downloading -
-        // gives us the URL(s) for the selected format PLUS duration/filesize,
-        // which we need to approximate seek offsets when muxing on the fly.
-        psi.ArgumentList.Add("-j");
-        psi.ArgumentList.Add("-f");
-        psi.ArgumentList.Add(BuildFormat(config));
-
-        // NOTE: we deliberately do NOT force the iOS player client. YouTube now
-        // gates its iOS HTTPS formats behind a GVS PO token, so those formats get
-        // skipped and resolution fails. The default client already exposes
-        // DASH formats up to 4K/8K that resolve cleanly.
+            psi.ArgumentList.Add(arg);
+        }
 
         // --- Speed flags ---
         // Never expand playlists, keep output terse, and fail fast on stalls.
@@ -442,32 +393,46 @@ public class PlaybackResolver
         using var cookieFile = CookieFile.Apply(psi, config.YouTubeCookies, _logger);
         psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
 
+        ProcessRunner.Result? result;
         try
         {
-            using var process = new Process { StartInfo = psi };
-            process.Start();
-
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-            var stderrTask = process.StandardError.ReadToEndAsync(ct);
-            await process.WaitForExitAsync(ct).ConfigureAwait(false);
-
-            var stdout = await stdoutTask.ConfigureAwait(false);
-            var stderr = await stderrTask.ConfigureAwait(false);
-
-            if (process.ExitCode != 0)
-            {
-                _logger.LogWarning("yt-dlp failed for {VideoId}: {Error}", videoId, stderr.Trim());
-                CookieFile.ReportBotCheck(stderr, config.YouTubeCookies, _logger);
-                return null;
-            }
-
-            return ParseInfo(stdout, videoId);
+            result = await ProcessRunner.RunAsync(psi, YtDlpTimeout, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogDebug("yt-dlp ({Purpose}) for {VideoId} cancelled - the request went away", purpose, videoId);
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to launch yt-dlp at '{Path}'", ytDlpPath);
             return null;
         }
+
+        if (result is null)
+        {
+            _logger.LogWarning("yt-dlp ({Purpose}) for {VideoId} timed out after {Seconds}s and was killed", purpose, videoId, YtDlpTimeout.TotalSeconds);
+            return null;
+        }
+
+        if (result.ExitCode != 0)
+        {
+            // The HLS manifest probe "failing" with no matching format is its
+            // normal outcome - most videos have no combined HLS (see
+            // ResolveDirectAsync) - not worth a warning on every first play.
+            var expected = purpose == "HLS manifest"
+                && result.Stderr.Contains("Requested format is not available", StringComparison.Ordinal);
+            _logger.Log(
+                expected ? LogLevel.Debug : LogLevel.Warning,
+                "yt-dlp ({Purpose}) failed for {VideoId}: {Error}",
+                purpose,
+                videoId,
+                result.Stderr.Trim());
+            CookieFile.ReportBotCheck(result.Stderr, config.YouTubeCookies, _logger);
+            return null;
+        }
+
+        return result.Stdout;
     }
 
     private ResolvedStream? ParseInfo(string stdout, string videoId)

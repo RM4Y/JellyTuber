@@ -68,6 +68,13 @@ public class PlaybackController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult> Stream([FromRoute] string videoId, CancellationToken ct)
     {
+        // Anonymous endpoint: only ever resolve/encode videos that are
+        // actually in the library - see KnownVideos.
+        if (!KnownVideos.Contains(videoId))
+        {
+            return NotFound();
+        }
+
         // Fully cached already (any earlier play, by anyone, finished
         // encoding it) - skip yt-dlp/network-tier detection entirely and
         // build the playlist straight from VideoCache's own record of the
@@ -235,22 +242,43 @@ public class PlaybackController : ControllerBase
     /// <summary>
     /// The requesting client's real IP, for <see cref="LocalNetworkDetector"/>.
     /// Behind a reverse proxy, <see cref="ConnectionInfo.RemoteIpAddress"/> is
-    /// the proxy's own address, not the client's - X-Forwarded-For (set by
-    /// every standard reverse proxy) carries the real originating IP as its
-    /// first, leftmost entry.
+    /// the proxy's own address, not the client's, and X-Forwarded-For carries
+    /// the real one. That header is only trusted when the direct peer is
+    /// itself on a private network (i.e. is the proxy), and read from the
+    /// RIGHT: nginx's $proxy_add_x_forwarded_for appends the address it saw
+    /// to whatever the client sent, so the leftmost entry is client-controlled
+    /// and the first public address from the right is the real client. All
+    /// entries private means the client itself is on the LAN.
     /// </summary>
     private IPAddress? GetClientIp()
     {
-        if (Request.Headers.TryGetValue("X-Forwarded-For", out var forwardedFor) && forwardedFor.Count > 0)
+        var peer = HttpContext.Connection.RemoteIpAddress;
+        if (peer is null || !LocalNetworkDetector.IsPrivateOrLoopback(peer)
+            || !Request.Headers.TryGetValue("X-Forwarded-For", out var forwardedFor))
         {
-            var first = forwardedFor[0]?.Split(',')[0].Trim();
-            if (!string.IsNullOrEmpty(first) && IPAddress.TryParse(first, out var parsed))
-            {
-                return parsed;
-            }
+            return peer;
         }
 
-        return HttpContext.Connection.RemoteIpAddress;
+        var entries = string.Join(',', forwardedFor.ToArray())
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        IPAddress? leftmostPrivate = null;
+        for (var i = entries.Length - 1; i >= 0; i--)
+        {
+            if (!IPAddress.TryParse(entries[i], out var ip))
+            {
+                break; // garbage from here leftwards is client-supplied
+            }
+
+            if (!LocalNetworkDetector.IsPrivateOrLoopback(ip))
+            {
+                return ip;
+            }
+
+            leftmostPrivate = ip;
+        }
+
+        return leftmostPrivate ?? peer;
     }
 
     /// <summary>
@@ -381,7 +409,7 @@ public class PlaybackController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult> Segment([FromRoute] string videoId, [FromRoute] int index, CancellationToken ct)
     {
-        if (index < 0)
+        if (index < 0 || !KnownVideos.IsValidId(videoId))
         {
             return NotFound();
         }
@@ -392,6 +420,13 @@ public class PlaybackController : ControllerBase
         if (cachedPath is not null)
         {
             return await ServeSegmentFileAsync(cachedPath, ct).ConfigureAwait(false);
+        }
+
+        // Anything past this point may start yt-dlp and an encode - same
+        // library-only rule as Stream().
+        if (!KnownVideos.Contains(videoId))
+        {
+            return NotFound();
         }
 
         var resolver = new PlaybackResolver(_httpClientFactory, _logger);

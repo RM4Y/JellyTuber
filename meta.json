@@ -4,7 +4,7 @@
   "name": "JellyTuber",
   "description": "Index YouTube channels and playlists via the YouTube Data API, stream on demand with yt-dlp.",
   "overview": "Fast YouTube indexing using the official Data API instead of scraping.",
-  "owner": "you",
+  "owner": "self",
   "targetAbi": "10.11.6.0",
   "version": "1.14.4.0"
 }

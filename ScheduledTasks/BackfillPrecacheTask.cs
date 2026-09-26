@@ -56,25 +56,25 @@ public class BackfillPrecacheTask : IScheduledTask
             return;
         }
 
-        var http = _httpClientFactory.CreateClient();
-        var writer = new LibraryWriter(http, _logger);
-
         // config.LibraryFolder recursively covers every per-user folder
         // (they're always nested under it) - only an admin source with an
         // explicit custom DestinationFolder can land outside it.
         var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { config.LibraryFolder };
-        foreach (var source in config.Sources)
+        lock (Plugin.ConfigLock)
         {
-            if (!string.IsNullOrWhiteSpace(source.DestinationFolder))
+            foreach (var source in config.Sources)
             {
-                roots.Add(source.DestinationFolder);
+                if (!string.IsNullOrWhiteSpace(source.DestinationFolder))
+                {
+                    roots.Add(source.DestinationFolder);
+                }
             }
         }
 
         var videoIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var root in roots)
         {
-            foreach (var id in writer.ListAllVideoIds(root))
+            foreach (var id in LibraryWriter.ListAllVideoIds(root))
             {
                 videoIds.Add(id);
             }

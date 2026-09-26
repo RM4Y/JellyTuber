@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -41,6 +42,22 @@ internal static class VideoCache
 
     /// <summary>Earlier, incompatible cache roots - see <see cref="PurgeLegacyCaches"/>.</summary>
     private static readonly string[] LegacyRootDirNames = { "videocache" };
+
+    /// <summary>
+    /// How often a cache hit may rewrite meta.json's LastAccessUtc. It only
+    /// feeds least-recently-used eviction, so minutes of precision is plenty
+    /// - and it used to be rewritten on every single segment request.
+    /// </summary>
+    private static readonly TimeSpan TouchInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Serializes meta.json read-modify-write sequences. Without it a
+    /// TouchAccess that read Completed=false just before MarkCompleted wrote
+    /// true would write false straight back.
+    /// </summary>
+    private static readonly object MetaLock = new();
+
+    private static readonly ConcurrentDictionary<string, DateTime> LastTouchUtc = new(StringComparer.Ordinal);
 
     private static string RootDir => Path.Combine(Plugin.Instance!.DataFolderPath, RootDirName);
 
@@ -85,48 +102,70 @@ internal static class VideoCache
     /// <summary>Writes an initial meta.json only if one doesn't already exist - never clobbers a completed cache's own record.</summary>
     public static void EnsureMeta(string videoId, double durationSeconds, int totalSegments, int encodedHeight)
     {
-        if (TryGetMeta(videoId) is not null)
+        lock (MetaLock)
         {
-            return;
-        }
+            if (TryGetMeta(videoId) is not null)
+            {
+                return;
+            }
 
-        SaveMeta(videoId, new CacheMeta
-        {
-            DurationSeconds = durationSeconds,
-            TotalSegments = totalSegments,
-            EncodedHeight = encodedHeight,
-            Completed = false,
-            LastAccessUtc = DateTime.UtcNow
-        });
+            SaveMeta(videoId, new CacheMeta
+            {
+                DurationSeconds = durationSeconds,
+                TotalSegments = totalSegments,
+                EncodedHeight = encodedHeight,
+                Completed = false,
+                LastAccessUtc = DateTime.UtcNow
+            });
+        }
     }
 
     public static void MarkCompleted(string videoId, double durationSeconds, int totalSegments)
     {
-        SaveMeta(videoId, new CacheMeta
+        lock (MetaLock)
         {
-            DurationSeconds = durationSeconds,
-            TotalSegments = totalSegments,
-            EncodedHeight = TryGetMeta(videoId)?.EncodedHeight,
-            Completed = true,
-            LastAccessUtc = DateTime.UtcNow
-        });
+            SaveMeta(videoId, new CacheMeta
+            {
+                DurationSeconds = durationSeconds,
+                TotalSegments = totalSegments,
+                EncodedHeight = TryGetMeta(videoId)?.EncodedHeight,
+                Completed = true,
+                LastAccessUtc = DateTime.UtcNow
+            });
+        }
     }
 
     public static void TouchAccess(string videoId)
     {
-        var meta = TryGetMeta(videoId);
-        if (meta is null)
+        var now = DateTime.UtcNow;
+        if (LastTouchUtc.TryGetValue(videoId, out var last) && now - last < TouchInterval)
         {
             return;
         }
 
-        meta.LastAccessUtc = DateTime.UtcNow;
-        SaveMeta(videoId, meta);
+        LastTouchUtc[videoId] = now;
+        lock (MetaLock)
+        {
+            var meta = TryGetMeta(videoId);
+            if (meta is null)
+            {
+                return;
+            }
+
+            meta.LastAccessUtc = now;
+            SaveMeta(videoId, meta);
+        }
     }
 
     /// <summary>Deletes a video's entire cache folder. Used both by disk-cap eviction and by the library retention hooks in <see cref="LibraryWriter"/>.</summary>
     public static void Delete(string videoId)
     {
+        LastTouchUtc.TryRemove(videoId, out _);
+        if (Plugin.Instance is null)
+        {
+            return; // not running inside Jellyfin (unit tests) - no cache to purge
+        }
+
         var dir = GetVideoDir(videoId);
         try
         {
@@ -271,28 +310,38 @@ internal static class VideoCache
         }
     }
 
+    /// <summary>
+    /// Writes to a temp file then renames it over meta.json, so a concurrent
+    /// <see cref="TryGetMeta"/> sees either the old or the new content, never
+    /// a truncated file - which it would read as "no meta", letting
+    /// <see cref="EnsureMeta"/> overwrite a completed cache's record.
+    /// </summary>
     private static void SaveMeta(string videoId, CacheMeta meta)
     {
+        var dir = GetVideoDir(videoId);
+        var tmp = Path.Combine(dir, MetaFileName + "." + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
-            Directory.CreateDirectory(GetVideoDir(videoId));
-            File.WriteAllText(Path.Combine(GetVideoDir(videoId), MetaFileName), JsonSerializer.Serialize(meta));
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(tmp, JsonSerializer.Serialize(meta));
+            File.Move(tmp, Path.Combine(dir, MetaFileName), overwrite: true);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // best effort
+            try
+            {
+                File.Delete(tmp);
+            }
+            catch (Exception)
+            {
+                // ignore
+            }
         }
     }
 
-    private static string Sanitize(string videoId)
-    {
-        foreach (var c in Path.GetInvalidFileNameChars())
-        {
-            videoId = videoId.Replace(c, '_');
-        }
-
-        return videoId;
-    }
+    /// <summary>Callers only ever pass validated 11-char ids (see <see cref="KnownVideos.IsValidId"/>); this just guarantees a single, non-"..", path segment regardless.</summary>
+    private static string Sanitize(string videoId) => PathSafety.Segment(videoId, "_");
 
     internal sealed class CacheMeta
     {

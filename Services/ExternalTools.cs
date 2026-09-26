@@ -45,65 +45,32 @@ public static class ExternalTools
 
     private static string DenoLocalFileName => OperatingSystem.IsWindows() ? "deno.exe" : "deno";
 
-    /// <summary>Returns the path to a ready-to-run yt-dlp binary, downloading/updating it first if needed. Null only if the download failed and no prior copy exists.</summary>
+    /// <summary>
+    /// After a failed background update, how long until the next attempt (by
+    /// backdating the update marker) - instead of retrying on every call.
+    /// </summary>
+    private static readonly TimeSpan FailedUpdateRetryDelay = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Returns the path to a ready-to-run yt-dlp binary. Only the very first
+    /// download is awaited; once a copy exists it's returned immediately and
+    /// the periodic update runs in the background - it used to run inline,
+    /// making the first playback of the day wait for a ~35MB download. Null
+    /// only if no copy exists and the download failed.
+    /// </summary>
     public static async Task<string?> EnsureYtDlpAsync(IHttpClientFactory httpClientFactory, ILogger logger, CancellationToken ct)
     {
         var path = Path.Combine(BinDir, YtDlpLocalFileName);
-
-        if (File.Exists(path) && !IsUpdateDue(path))
-        {
-            return path;
-        }
-
-        await YtDlpLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            if (File.Exists(path) && !IsUpdateDue(path))
-            {
-                return path;
-            }
-
-            var haveExisting = File.Exists(path);
-            Directory.CreateDirectory(BinDir);
-            var tmp = path + ".download";
-
-            try
-            {
-                using var http = httpClientFactory.CreateClient();
-                http.Timeout = TimeSpan.FromMinutes(2);
-
-                var asset = YtDlpAssetName();
-                await DownloadToFileAsync(http, $"{YtDlpBaseUrl}/{asset}", tmp, ct).ConfigureAwait(false);
-                await VerifyChecksumAsync(http, $"{YtDlpBaseUrl}/SHA2-256SUMS", asset, tmp, logger, ct).ConfigureAwait(false);
-                MakeExecutable(tmp);
-                File.Move(tmp, path, overwrite: true);
-                TouchUpdateMarker(path);
-                logger.LogInformation("yt-dlp ready at {Path} ({Asset})", path, asset);
-                return path;
-            }
-            catch (Exception ex)
-            {
-                if (haveExisting)
-                {
-                    logger.LogDebug(ex, "yt-dlp update check failed; keeping existing binary at {Path}", path);
-                    return path;
-                }
-
-                logger.LogError(ex, "Failed to download yt-dlp");
-                return null;
-            }
-            finally
-            {
-                TryDelete(tmp);
-            }
-        }
-        finally
-        {
-            YtDlpLock.Release();
-        }
+        return await EnsureAsync(
+            path,
+            YtDlpLock,
+            token => DownloadYtDlpAsync(httpClientFactory, path, logger, token),
+            "yt-dlp",
+            logger,
+            ct).ConfigureAwait(false);
     }
 
-    /// <summary>Returns the path to a ready-to-run Deno binary, or null if this host's OS/architecture has no Deno build, or the download failed and no prior copy exists.</summary>
+    /// <summary>Same as <see cref="EnsureYtDlpAsync"/> for Deno. Also null when this host's OS/architecture has no Deno build.</summary>
     public static async Task<string?> EnsureDenoAsync(IHttpClientFactory httpClientFactory, ILogger logger, CancellationToken ct)
     {
         var asset = DenoAssetName();
@@ -113,85 +80,146 @@ public static class ExternalTools
         }
 
         var path = Path.Combine(BinDir, DenoLocalFileName);
+        return await EnsureAsync(
+            path,
+            DenoLock,
+            token => DownloadDenoAsync(httpClientFactory, asset, path, logger, token),
+            "Deno",
+            logger,
+            ct).ConfigureAwait(false);
+    }
 
-        if (File.Exists(path) && !IsUpdateDue(path))
+    private static async Task<string?> EnsureAsync(string path, SemaphoreSlim gate, Func<CancellationToken, Task> download, string name, ILogger logger, CancellationToken ct)
+    {
+        if (File.Exists(path))
         {
+            if (IsUpdateDue(path))
+            {
+                UpdateInBackground(path, gate, download, name, logger);
+            }
+
             return path;
         }
 
-        await DenoLock.WaitAsync(ct).ConfigureAwait(false);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (File.Exists(path) && !IsUpdateDue(path))
+            if (File.Exists(path))
             {
                 return path;
             }
 
-            var haveExisting = File.Exists(path);
-            Directory.CreateDirectory(BinDir);
-            var zipPath = path + ".zip.download";
-            var extractDir = path + ".extract";
-
-            try
-            {
-                using var http = httpClientFactory.CreateClient();
-                http.Timeout = TimeSpan.FromMinutes(3);
-
-                await DownloadToFileAsync(http, $"{DenoBaseUrl}/{asset}", zipPath, ct).ConfigureAwait(false);
-                await VerifyChecksumAsync(http, $"{DenoBaseUrl}/{asset}.sha256sum", null, zipPath, logger, ct).ConfigureAwait(false);
-
-                if (Directory.Exists(extractDir))
-                {
-                    Directory.Delete(extractDir, recursive: true);
-                }
-
-                ZipFile.ExtractToDirectory(zipPath, extractDir);
-
-                var extracted = Directory
-                    .GetFiles(extractDir, DenoLocalFileName, SearchOption.AllDirectories)
-                    .FirstOrDefault();
-
-                if (extracted is null)
-                {
-                    throw new InvalidOperationException("Deno archive did not contain a deno binary");
-                }
-
-                MakeExecutable(extracted);
-                File.Move(extracted, path, overwrite: true);
-                TouchUpdateMarker(path);
-                logger.LogInformation("Deno ready at {Path} ({Asset})", path, asset);
-                return path;
-            }
-            catch (Exception ex)
-            {
-                if (haveExisting)
-                {
-                    logger.LogDebug(ex, "Deno update check failed; keeping existing binary at {Path}", path);
-                    return path;
-                }
-
-                logger.LogWarning(ex, "Failed to provision Deno; formats needing YouTube's n-challenge (1080p+) may fail to resolve");
-                return null;
-            }
-            finally
-            {
-                TryDelete(zipPath);
-                if (Directory.Exists(extractDir))
-                {
-                    try
-                    {
-                        Directory.Delete(extractDir, recursive: true);
-                    }
-                    catch
-                    {
-                        // best effort
-                    }
-                }
-            }
+            await download(ct).ConfigureAwait(false);
+            return path;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Failed to download {Tool}", name);
+            return null;
         }
         finally
         {
-            DenoLock.Release();
+            gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Replaces the binary in the background. Swapping it in is a rename, so
+    /// yt-dlp processes already running from the old file are unaffected.
+    /// </summary>
+    private static void UpdateInBackground(string path, SemaphoreSlim gate, Func<CancellationToken, Task> download, string name, ILogger logger)
+    {
+        if (!gate.Wait(0))
+        {
+            return; // an update (or first download) is already running
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await download(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "{Tool} update check failed; keeping the existing binary at {Path}", name, path);
+                TouchUpdateMarker(path, DateTime.UtcNow - UpdateCheckInterval + FailedUpdateRetryDelay);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        });
+    }
+
+    private static async Task DownloadYtDlpAsync(IHttpClientFactory httpClientFactory, string path, ILogger logger, CancellationToken ct)
+    {
+        Directory.CreateDirectory(BinDir);
+        var tmp = path + ".download";
+        try
+        {
+            using var http = httpClientFactory.CreateClient();
+            http.Timeout = TimeSpan.FromMinutes(2);
+
+            var asset = YtDlpAssetName();
+            await DownloadToFileAsync(http, $"{YtDlpBaseUrl}/{asset}", tmp, ct).ConfigureAwait(false);
+            await VerifyChecksumAsync(http, $"{YtDlpBaseUrl}/SHA2-256SUMS", asset, tmp, logger, ct).ConfigureAwait(false);
+            MakeExecutable(tmp);
+            File.Move(tmp, path, overwrite: true);
+            TouchUpdateMarker(path, DateTime.UtcNow);
+            logger.LogInformation("yt-dlp ready at {Path} ({Asset})", path, asset);
+        }
+        finally
+        {
+            TryDelete(tmp);
+        }
+    }
+
+    private static async Task DownloadDenoAsync(IHttpClientFactory httpClientFactory, string asset, string path, ILogger logger, CancellationToken ct)
+    {
+        Directory.CreateDirectory(BinDir);
+        var zipPath = path + ".zip.download";
+        var extractDir = path + ".extract";
+
+        try
+        {
+            using var http = httpClientFactory.CreateClient();
+            http.Timeout = TimeSpan.FromMinutes(3);
+
+            await DownloadToFileAsync(http, $"{DenoBaseUrl}/{asset}", zipPath, ct).ConfigureAwait(false);
+            await VerifyChecksumAsync(http, $"{DenoBaseUrl}/{asset}.sha256sum", null, zipPath, logger, ct).ConfigureAwait(false);
+
+            if (Directory.Exists(extractDir))
+            {
+                Directory.Delete(extractDir, recursive: true);
+            }
+
+            ZipFile.ExtractToDirectory(zipPath, extractDir);
+
+            var extracted = Directory
+                .GetFiles(extractDir, DenoLocalFileName, SearchOption.AllDirectories)
+                .FirstOrDefault()
+                ?? throw new InvalidOperationException("Deno archive did not contain a deno binary");
+
+            MakeExecutable(extracted);
+            File.Move(extracted, path, overwrite: true);
+            TouchUpdateMarker(path, DateTime.UtcNow);
+            logger.LogInformation("Deno ready at {Path} ({Asset})", path, asset);
+        }
+        finally
+        {
+            TryDelete(zipPath);
+            if (Directory.Exists(extractDir))
+            {
+                try
+                {
+                    Directory.Delete(extractDir, recursive: true);
+                }
+                catch
+                {
+                    // best effort
+                }
+            }
         }
     }
 
@@ -378,11 +406,13 @@ public static class ExternalTools
         return DateTime.UtcNow - File.GetLastWriteTimeUtc(marker) > UpdateCheckInterval;
     }
 
-    private static void TouchUpdateMarker(string binaryPath)
+    private static void TouchUpdateMarker(string binaryPath, DateTime checkedAtUtc)
     {
         try
         {
-            File.WriteAllText(MarkerPath(binaryPath), DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            var marker = MarkerPath(binaryPath);
+            File.WriteAllText(marker, checkedAtUtc.ToString("o", CultureInfo.InvariantCulture));
+            File.SetLastWriteTimeUtc(marker, checkedAtUtc);
         }
         catch
         {

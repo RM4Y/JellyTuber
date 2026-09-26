@@ -47,6 +47,30 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public void Save() => SaveConfiguration();
 
     /// <summary>
+    /// The dashboard page reads the whole configuration, edits only the admin
+    /// settings, and posts the whole thing back - so a channel, video or share
+    /// code a user added in between used to be silently wiped by the stale
+    /// copy. Those lists are only ever edited through the self-service
+    /// endpoints, so the live ones always win here. They're carried over as
+    /// the same List instances, so an edit racing with this swap still lands.
+    /// </summary>
+    public override void UpdateConfiguration(BasePluginConfiguration configuration)
+    {
+        lock (ConfigLock)
+        {
+            if (configuration is PluginConfiguration incoming)
+            {
+                var current = Configuration;
+                incoming.UserChannels = current.UserChannels;
+                incoming.UserVideos = current.UserVideos;
+                incoming.ShareCodes = current.ShareCodes;
+            }
+
+            base.UpdateConfiguration(configuration);
+        }
+    }
+
+    /// <summary>
     /// Older versions of this plugin required manually setting a yt-dlp
     /// binary path and a <c>--js-runtimes deno:&lt;path&gt;</c> flag; both
     /// yt-dlp and Deno are now downloaded and managed automatically (see

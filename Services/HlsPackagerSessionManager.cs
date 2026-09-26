@@ -83,6 +83,15 @@ internal static class HlsPackagerSessionManager
     private const int MaxSegmentsPerSession = 1800;
 
     /// <summary>
+    /// Minimum gap between two disk-cap checks. <see cref="SweepIdle"/> runs
+    /// on every segment request, and the cap check walks every file in the
+    /// cache - tens of thousands of 2s segments at the default 20GB.
+    /// </summary>
+    private static readonly TimeSpan SizeCapCheckInterval = TimeSpan.FromMinutes(1);
+
+    private static long _lastSizeCapCheckTicks;
+
+    /// <summary>
     /// Returns the path to the completed segment file for <paramref name="index"/>,
     /// starting or restarting the packaging session for <paramref name="videoId"/>
     /// as needed. Checks <see cref="VideoCache"/> first - a video whose
@@ -384,8 +393,7 @@ internal static class HlsPackagerSessionManager
             dir,
             videoEncoder,
             outputHeight,
-            scale,
-            isSameNetwork: true);
+            scale);
 
         DrainStderrInBackground(process, logger, videoId);
 
@@ -676,7 +684,8 @@ internal static class HlsPackagerSessionManager
     /// Demotes any session that's gone quiet (no segment request in
     /// <see cref="IdleTimeout"/>) to a background completion job - same
     /// path as a real playback stop, see <see cref="DemoteToBackground"/> -
-    /// then enforces the video-cache disk-size cap, if configured.
+    /// then enforces the video-cache disk-size cap, if configured (at most
+    /// once per <see cref="SizeCapCheckInterval"/>).
     /// </summary>
     private static void SweepIdle(ILogger logger)
     {
@@ -687,6 +696,14 @@ internal static class HlsPackagerSessionManager
             {
                 DemoteToBackground(kvp.Key);
             }
+        }
+
+        var nowTicks = now.Ticks;
+        var lastCheck = Interlocked.Read(ref _lastSizeCapCheckTicks);
+        if (nowTicks - lastCheck < SizeCapCheckInterval.Ticks
+            || Interlocked.CompareExchange(ref _lastSizeCapCheckTicks, nowTicks, lastCheck) != lastCheck)
+        {
+            return;
         }
 
         var maxGb = Plugin.Instance?.Configuration.VideoCacheMaxGB ?? 20;

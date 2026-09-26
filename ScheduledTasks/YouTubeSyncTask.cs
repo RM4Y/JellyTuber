@@ -252,6 +252,15 @@ public class YouTubeSyncTask : IScheduledTask
             : source.DestinationFolder;
         var sourceRoot = Path.Combine(root, Sanitize(source.Name));
 
+        // Sanitize() already rules out "..", but the retention/cleanup below
+        // deletes whole folders under sourceRoot - never let it be the
+        // destination root itself, or anything outside it.
+        if (!PathSafety.IsStrictlyInside(sourceRoot, root))
+        {
+            _logger.LogWarning("Skipping source {Name}: its folder {Dir} is not inside {Root}", source.Name, sourceRoot, root);
+            return 0;
+        }
+
         // How many of the most recent videos this channel should keep,
         // clamped to the 10-50 range regardless of what's stored in config
         // (older values, or bad user input, could be outside it).
@@ -329,7 +338,7 @@ public class YouTubeSyncTask : IScheduledTask
                         // just re-enabled), then drop them from this run.
                         foreach (var sv in videos.FindAll(v => tabShorts.Contains(v.VideoId)))
                         {
-                            writer.RemoveVideoIfExists(sourceRoot, source, sv, videoIndex);
+                            writer.RemoveVideoIfExists(sourceRoot, sv, videoIndex);
                         }
 
                         var beforeTab = videos.Count;
@@ -391,7 +400,7 @@ public class YouTubeSyncTask : IScheduledTask
                 // Delete any Short already written, then drop them from this run.
                 foreach (var v in videos.FindAll(v => shortIds.ContainsKey(v.VideoId)))
                 {
-                    writer.RemoveVideoIfExists(sourceRoot, source, v, videoIndex);
+                    writer.RemoveVideoIfExists(sourceRoot, v, videoIndex);
                 }
 
                 videos = videos.FindAll(v => !shortIds.ContainsKey(v.VideoId));
@@ -424,6 +433,7 @@ public class YouTubeSyncTask : IScheduledTask
 
             var created = await writer.WriteVideoAsync(sourceRoot, source, video, episode, strmTarget, videoIndex, ct)
                 .ConfigureAwait(false);
+            KnownVideos.Add(video.VideoId);
             if (created)
             {
                 written++;
@@ -507,15 +517,20 @@ public class YouTubeSyncTask : IScheduledTask
                         var fresh = await api.GetVideoAsync(uv.VideoId, ct).ConfigureAwait(false);
                         if (fresh is not null)
                         {
-                            if (!string.IsNullOrWhiteSpace(fresh.Title))
+                            // uv is the live config object (the snapshot only
+                            // copied the list), so mutate it under the lock.
+                            lock (Plugin.ConfigLock)
                             {
-                                uv.Title = fresh.Title;
-                            }
+                                if (!string.IsNullOrWhiteSpace(fresh.Title))
+                                {
+                                    uv.Title = fresh.Title;
+                                }
 
-                            uv.Description = fresh.Description;
-                            if (string.IsNullOrWhiteSpace(uv.Thumbnail))
-                            {
-                                uv.Thumbnail = fresh.ThumbnailUrl;
+                                uv.Description = fresh.Description;
+                                if (string.IsNullOrWhiteSpace(uv.Thumbnail))
+                                {
+                                    uv.Thumbnail = fresh.ThumbnailUrl;
+                                }
                             }
 
                             configDirty = true;
@@ -540,16 +555,11 @@ public class YouTubeSyncTask : IScheduledTask
                 var created = await writer.WriteVideoAsync(channelRoot, source, video, episode, strmTarget, videoIndex, ct)
                     .ConfigureAwait(false);
 
+                KnownVideos.Add(uv.VideoId);
                 if (created)
                 {
                     written++;
                     SchedulePrecache(uv.VideoId, precacheGate);
-                }
-                else
-                {
-                    // Already on disk -> make sure its .nfo reflects current metadata.
-                    await writer.RefreshVideoNfoAsync(channelRoot, source, video, episode, ct)
-                        .ConfigureAwait(false);
                 }
             }
 
@@ -579,8 +589,15 @@ public class YouTubeSyncTask : IScheduledTask
         var created = false;
 
         // Distinct users (by on-disk folder), keeping a display name.
-        var users = config.UserChannels.Select(c => c.UserName)
-            .Concat(config.UserVideos.Select(v => v.UserName))
+        List<string> userNames;
+        lock (Plugin.ConfigLock)
+        {
+            userNames = config.UserChannels.Select(c => c.UserName)
+                .Concat(config.UserVideos.Select(v => v.UserName))
+                .ToList();
+        }
+
+        var users = userNames
             .Where(n => !string.IsNullOrWhiteSpace(n))
             .GroupBy(SanitizeUser)
             .Select(g => new { Folder = g.Key, Display = g.First() })
@@ -777,28 +794,7 @@ public class YouTubeSyncTask : IScheduledTask
         return Math.Clamp(value, 10, 50);
     }
 
-    private static string SanitizeUser(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return "user";
-        }
+    private static string SanitizeUser(string name) => PathSafety.Segment(name, "user");
 
-        foreach (var c in Path.GetInvalidFileNameChars())
-        {
-            name = name.Replace(c, '_');
-        }
-
-        return name.Trim();
-    }
-
-    private static string Sanitize(string name)
-    {
-        foreach (var c in Path.GetInvalidFileNameChars())
-        {
-            name = name.Replace(c, '_');
-        }
-
-        return name.Trim();
-    }
+    private static string Sanitize(string name) => PathSafety.Segment(name, "channel");
 }

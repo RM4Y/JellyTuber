@@ -77,7 +77,7 @@ public class JellyTuberMediaSourceProvider : IMediaSourceProvider
         }
 
         var isMatch = StreamUrlPattern.IsMatch(url);
-        _logger.LogInformation(
+        _logger.LogDebug(
             "JellyTuberMediaSourceProvider.GetMediaSources for item {ItemId} ({ItemName}): strm url={Url}, isJellyTuberItem={IsMatch}",
             item.Id,
             item.Name,
@@ -102,6 +102,14 @@ public class JellyTuberMediaSourceProvider : IMediaSourceProvider
         // own bandwidth-based quality decisions bad data.
         var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
         var height = config.MaxHeight > 0 ? config.MaxHeight : 1080;
+
+        // Above 1080p is only ever served when the GPU encoder is usable
+        // (see PlaybackResolver.BuildFormat) - don't declare 4K otherwise.
+        if (!GpuEncoder.IsUsable)
+        {
+            height = Math.Min(height, 1080);
+        }
+
         var width = (int)Math.Round(height * 16.0 / 9.0);
         var videoBitrate = FfmpegMuxer.PickVideoBitrateBps(height, isSameNetwork: false);
         const int approximateAudioBitrateBps = 128_000;

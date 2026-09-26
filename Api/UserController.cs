@@ -189,6 +189,16 @@ self.addEventListener("fetch", function (e) {
             }).ToList();
 
             SearchCache[q] = (DateTime.UtcNow, results);
+            if (SearchCache.Count > 200)
+            {
+                foreach (var kvp in SearchCache)
+                {
+                    if ((DateTime.UtcNow - kvp.Value.When).TotalMinutes >= 30)
+                    {
+                        SearchCache.TryRemove(kvp.Key, out _);
+                    }
+                }
+            }
             return new JsonResult(results);
         }
         catch (Exception ex)
@@ -200,37 +210,52 @@ self.addEventListener("fetch", function (e) {
 
     [HttpGet("JellyTuber/User/Channels")]
     [Authorize]
-    public ActionResult Channels([FromQuery] string userId)
+    public ActionResult Channels()
     {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
         var cfg = Plugin.Instance!.Configuration;
-        var mine = cfg.UserChannels
-            .Where(c => c.UserId == userId)
-            .Select(c => new { c.ChannelId, c.Name, c.ExcludeShorts, c.Thumbnail, c.MaxVideos })
-            .ToList();
-        return new JsonResult(mine);
+        lock (Plugin.ConfigLock)
+        {
+            var mine = cfg.UserChannels
+                .Where(c => IsUser(c.UserId, userId))
+                .Select(c => new { c.ChannelId, c.Name, c.ExcludeShorts, c.Thumbnail, c.MaxVideos })
+                .ToList();
+            return new JsonResult(mine);
+        }
     }
 
     [HttpPost("JellyTuber/User/Add")]
     [Authorize]
     public ActionResult Add([FromBody] AddRequest req)
     {
+        var user = SessionUser();
+        if (user is null)
+        {
+            return Forbid();
+        }
+
         var cfg = Plugin.Instance!.Configuration;
-        if (string.IsNullOrWhiteSpace(req.UserId) || string.IsNullOrWhiteSpace(req.ChannelId))
+        if (string.IsNullOrWhiteSpace(req.ChannelId))
         {
             return BadRequest();
         }
 
         lock (Plugin.ConfigLock)
         {
-            if (cfg.UserChannels.Any(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId))
+            if (cfg.UserChannels.Any(c => IsUser(c.UserId, user.Value.Id) && c.ChannelId == req.ChannelId))
             {
                 return new JsonResult(new { status = "exists" });
             }
 
             cfg.UserChannels.Add(new UserChannel
             {
-                UserId = req.UserId,
-                UserName = req.UserName ?? "user",
+                UserId = user.Value.Id,
+                UserName = user.Value.Name,
                 ChannelId = req.ChannelId,
                 Name = req.Name ?? req.ChannelId,
                 Url = $"https://www.youtube.com/channel/{req.ChannelId}",
@@ -247,11 +272,17 @@ self.addEventListener("fetch", function (e) {
     [Authorize]
     public ActionResult Remove([FromBody] ChannelRef req)
     {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
         var cfg = Plugin.Instance!.Configuration;
         int removed;
         lock (Plugin.ConfigLock)
         {
-            removed = cfg.UserChannels.RemoveAll(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId);
+            removed = cfg.UserChannels.RemoveAll(c => IsUser(c.UserId, userId) && c.ChannelId == req.ChannelId);
             if (removed > 0)
             {
                 Plugin.Instance.Save();
@@ -265,10 +296,16 @@ self.addEventListener("fetch", function (e) {
     [Authorize]
     public ActionResult ToggleShorts([FromBody] ToggleRequest req)
     {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
         var cfg = Plugin.Instance!.Configuration;
         lock (Plugin.ConfigLock)
         {
-            var entry = cfg.UserChannels.FirstOrDefault(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId);
+            var entry = cfg.UserChannels.FirstOrDefault(c => IsUser(c.UserId, userId) && c.ChannelId == req.ChannelId);
             if (entry is null)
             {
                 return NotFound();
@@ -288,11 +325,17 @@ self.addEventListener("fetch", function (e) {
     [Authorize]
     public ActionResult SetMaxVideos([FromBody] SetMaxVideosRequest req)
     {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
         var cfg = Plugin.Instance!.Configuration;
         var maxVideos = Math.Clamp(req.MaxVideos, 10, 50);
         lock (Plugin.ConfigLock)
         {
-            var entry = cfg.UserChannels.FirstOrDefault(c => c.UserId == req.UserId && c.ChannelId == req.ChannelId);
+            var entry = cfg.UserChannels.FirstOrDefault(c => IsUser(c.UserId, userId) && c.ChannelId == req.ChannelId);
             if (entry is null)
             {
                 return NotFound();
@@ -320,26 +363,41 @@ self.addEventListener("fetch", function (e) {
 
     [HttpGet("JellyTuber/User/Videos")]
     [Authorize]
-    public ActionResult Videos([FromQuery] string userId)
+    public ActionResult Videos()
     {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
         var cfg = Plugin.Instance!.Configuration;
-        var mine = cfg.UserVideos
-            .Where(v => v.UserId == userId)
-            .Select(v => new { v.VideoId, v.Title, v.Thumbnail, v.Url })
-            .ToList();
-        return new JsonResult(mine);
+        lock (Plugin.ConfigLock)
+        {
+            var mine = cfg.UserVideos
+                .Where(v => IsUser(v.UserId, userId))
+                .Select(v => new { v.VideoId, v.Title, v.Thumbnail, v.Url })
+                .ToList();
+            return new JsonResult(mine);
+        }
     }
 
     [HttpPost("JellyTuber/User/AddVideo")]
     [Authorize]
     public async Task<ActionResult> AddVideo([FromBody] AddVideoRequest req)
     {
-        if (string.IsNullOrWhiteSpace(req.UserId) || string.IsNullOrWhiteSpace(req.Url))
+        var user = SessionUser();
+        if (user is null)
+        {
+            return Forbid();
+        }
+
+        if (string.IsNullOrWhiteSpace(req.Url))
         {
             return BadRequest();
         }
 
-        var result = await AddVideoCoreAsync(req.UserId, req.UserName ?? "user", req.Url, HttpContext.RequestAborted).ConfigureAwait(false);
+        var result = await AddVideoCoreAsync(user.Value.Id, user.Value.Name, req.Url, HttpContext.RequestAborted).ConfigureAwait(false);
         return result.Status switch
         {
             "error" => BadRequest(result.Error),
@@ -476,7 +534,7 @@ self.addEventListener("fetch", function (e) {
 
         lock (Plugin.ConfigLock)
         {
-            if (cfg.UserVideos.Any(v => v.UserId == userId && v.VideoId == videoId))
+            if (cfg.UserVideos.Any(v => IsUser(v.UserId, userId) && v.VideoId == videoId))
             {
                 return new AddVideoResult("exists");
             }
@@ -526,7 +584,7 @@ self.addEventListener("fetch", function (e) {
 
             lock (Plugin.ConfigLock)
             {
-                if (cfg.UserVideos.Any(v => v.UserId == userId && v.VideoId == videoId))
+                if (cfg.UserVideos.Any(v => IsUser(v.UserId, userId) && v.VideoId == videoId))
                 {
                     return new AddVideoResult("exists");
                 }
@@ -554,6 +612,27 @@ self.addEventListener("fetch", function (e) {
         return Guid.TryParse(claim, out var id) && id != Guid.Empty ? id.ToString("N") : null;
     }
 
+    /// <summary>
+    /// The authenticated user's id and name, both from the server side - the
+    /// name decides the on-disk folder their content is written to, so it's
+    /// never taken from the request body.
+    /// </summary>
+    private (string Id, string Name)? SessionUser()
+    {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return null;
+        }
+
+        var name = _userManager.GetUserById(Guid.ParseExact(userId, "N"))?.Username;
+        return string.IsNullOrWhiteSpace(name) ? null : (userId, name);
+    }
+
+    /// <summary>Compares a stored user id (any Guid format) against a session user id in "N" format.</summary>
+    private static bool IsUser(string storedUserId, string userId) =>
+        Guid.TryParse(storedUserId, out var stored) && stored.ToString("N") == userId;
+
     private static string NewShareCode()
         => Convert.ToBase64String(RandomNumberGenerator.GetBytes(18)).Replace('+', '-').Replace('/', '_');
 
@@ -580,11 +659,17 @@ self.addEventListener("fetch", function (e) {
     [Authorize]
     public ActionResult RemoveVideo([FromBody] VideoRef req)
     {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
         var cfg = Plugin.Instance!.Configuration;
         int removed;
         lock (Plugin.ConfigLock)
         {
-            removed = cfg.UserVideos.RemoveAll(v => v.UserId == req.UserId && v.VideoId == req.VideoId);
+            removed = cfg.UserVideos.RemoveAll(v => IsUser(v.UserId, userId) && v.VideoId == req.VideoId);
             if (removed > 0)
             {
                 Plugin.Instance.Save();
@@ -608,8 +693,6 @@ self.addEventListener("fetch", function (e) {
 
     public class AddRequest
     {
-        public string UserId { get; set; } = string.Empty;
-        public string? UserName { get; set; }
         public string ChannelId { get; set; } = string.Empty;
         public string? Name { get; set; }
         public string? Thumbnail { get; set; }
@@ -617,34 +700,28 @@ self.addEventListener("fetch", function (e) {
 
     public class ChannelRef
     {
-        public string UserId { get; set; } = string.Empty;
         public string ChannelId { get; set; } = string.Empty;
     }
 
     public class ToggleRequest
     {
-        public string UserId { get; set; } = string.Empty;
         public string ChannelId { get; set; } = string.Empty;
         public bool ExcludeShorts { get; set; }
     }
 
     public class SetMaxVideosRequest
     {
-        public string UserId { get; set; } = string.Empty;
         public string ChannelId { get; set; } = string.Empty;
         public int MaxVideos { get; set; }
     }
 
     public class AddVideoRequest
     {
-        public string UserId { get; set; } = string.Empty;
-        public string? UserName { get; set; }
         public string Url { get; set; } = string.Empty;
     }
 
     public class VideoRef
     {
-        public string UserId { get; set; } = string.Empty;
         public string VideoId { get; set; } = string.Empty;
     }
 }

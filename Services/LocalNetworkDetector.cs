@@ -50,7 +50,7 @@ internal static class LocalNetworkDetector
         return serverIp is not null && string.Equals(serverIp, clientIp.ToString(), StringComparison.Ordinal);
     }
 
-    private static bool IsPrivateOrLoopback(IPAddress ip)
+    public static bool IsPrivateOrLoopback(IPAddress ip)
     {
         if (IPAddress.IsLoopback(ip))
         {

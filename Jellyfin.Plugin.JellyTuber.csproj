@@ -40,4 +40,15 @@
     <None Remove="3.5\**" />
   </ItemGroup>
 
+  <!-- Unit tests live in their own project (tests/) - keep them out of the plugin DLL. -->
+  <ItemGroup>
+    <Compile Remove="tests\**" />
+    <EmbeddedResource Remove="tests\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Jellyfin.Plugin.JellyTuber.Tests" />
+  </ItemGroup>
+
 </Project>

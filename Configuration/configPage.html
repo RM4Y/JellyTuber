@@ -151,46 +151,8 @@
 
     <script type="text/javascript">
         var JellyTuber = {
-            pluginId: "b9f8e1a2-3c4d-4e5f-8a7b-1c2d3e4f5a6b",
-            sources: []
+            pluginId: "b9f8e1a2-3c4d-4e5f-8a7b-1c2d3e4f5a6b"
         };
-
-        function ytfRenderSources() {
-            var container = document.querySelector("#SourcesList");
-            container.innerHTML = "";
-            JellyTuber.sources.forEach(function (s, i) {
-                var row = document.createElement("div");
-                row.style.border = "1px solid rgba(255,255,255,0.15)";
-                row.style.padding = "0.75em";
-                row.style.marginBottom = "0.5em";
-                row.style.borderRadius = "0.25em";
-                row.innerHTML =
-                    '<input class="ytf-f" data-i="' + i + '" data-k="Name" placeholder="Name in Jellyfin" value="' + (s.Name || "").replace(/"/g, "&quot;") + '" is="emby-input" />' +
-                    '<input class="ytf-f" data-i="' + i + '" data-k="Url" placeholder="Channel or playlist URL" value="' + (s.Url || "").replace(/"/g, "&quot;") + '" is="emby-input" />' +
-                    '<input class="ytf-f" data-i="' + i + '" data-k="DestinationFolder" placeholder="Destination folder (optional, for per-user libraries)" value="' + (s.DestinationFolder || "").replace(/"/g, "&quot;") + '" is="emby-input" />' +
-                    '<select class="ytf-f" data-i="' + i + '" data-k="Mode" is="emby-select">' +
-                    '<option value="Series"' + (s.Mode !== "Movies" ? " selected" : "") + '>Episodes in a series</option>' +
-                    '<option value="Movies"' + (s.Mode === "Movies" ? " selected" : "") + '>Separate movies</option>' +
-                    '</select>' +
-                    '<label style="display:block;margin:0.4em 0;"><input class="ytf-f" type="checkbox" data-i="' + i + '" data-k="ExcludeShorts"' + (s.ExcludeShorts !== false ? " checked" : "") + ' is="emby-checkbox" /> <span>Exclude Shorts</span></label>' +
-                    '<button is="emby-button" type="button" class="raised block" data-del="' + i + '"><span>Remove</span></button>';
-                container.appendChild(row);
-            });
-
-            container.querySelectorAll(".ytf-f").forEach(function (el) {
-                el.addEventListener("change", function () {
-                    var i = parseInt(el.getAttribute("data-i"), 10);
-                    var k = el.getAttribute("data-k");
-                    JellyTuber.sources[i][k] = (el.type === "checkbox") ? el.checked : el.value;
-                });
-            });
-            container.querySelectorAll("[data-del]").forEach(function (btn) {
-                btn.addEventListener("click", function () {
-                    JellyTuber.sources.splice(parseInt(btn.getAttribute("data-del"), 10), 1);
-                    ytfRenderSources();
-                });
-            });
-        }
 
         function ytfLoad() {
             Dashboard.showLoadingMsg();

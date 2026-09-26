@@ -396,7 +396,7 @@ internal static class PageHtml
   function field(o, k) { return o[k] != null ? o[k] : o[k.charAt(0).toLowerCase() + k.slice(1)]; }
 
   function loadMine() {
-    api("/JellyTuber/User/Channels?userId=" + encodeURIComponent(userId)).then(function (list) {
+    api("/JellyTuber/User/Channels").then(function (list) {
       var box = document.getElementById("mine"); box.innerHTML = "";
       var n = list.length;
       document.getElementById("count").textContent = n + (n > 1 ? " chaînes" : " chaîne");
@@ -417,7 +417,7 @@ internal static class PageHtml
         mvRange.addEventListener("input", function () { mvVal.textContent = mvRange.value; });
         mvRange.addEventListener("change", function () {
           var n = parseInt(mvRange.value, 10);
-          api("/JellyTuber/User/SetMaxVideos", { method: "POST", body: JSON.stringify({ userId: userId, channelId: cid, maxVideos: n }) })
+          api("/JellyTuber/User/SetMaxVideos", { method: "POST", body: JSON.stringify({ channelId: cid, maxVideos: n }) })
             .then(function () { toast("Limite mise à jour : " + n + " vidéos."); });
         });
         card.appendChild(mv);
@@ -426,13 +426,13 @@ internal static class PageHtml
         sh.innerHTML = '<span class="dot"></span>Exclure les Shorts';
         sh.addEventListener("click", function () {
           ex = !ex; sh.className = "shorts" + (ex ? " on" : "");
-          api("/JellyTuber/User/ToggleShorts", { method: "POST", body: JSON.stringify({ userId: userId, channelId: cid, excludeShorts: ex }) });
+          api("/JellyTuber/User/ToggleShorts", { method: "POST", body: JSON.stringify({ channelId: cid, excludeShorts: ex }) });
         });
         card.appendChild(sh);
 
         var rm = document.createElement("button"); rm.className = "remove"; rm.textContent = "Retirer";
         rm.addEventListener("click", function () {
-          api("/JellyTuber/User/Remove", { method: "POST", body: JSON.stringify({ userId: userId, channelId: cid }) }).then(loadMine);
+          api("/JellyTuber/User/Remove", { method: "POST", body: JSON.stringify({ channelId: cid }) }).then(loadMine);
         });
         card.appendChild(rm);
         box.appendChild(card);
@@ -457,7 +457,7 @@ internal static class PageHtml
         row.appendChild(nm);
         var add = document.createElement("button"); add.className = "btn-accent"; add.style.cssText = "padding:8px 16px; font-size:13px;"; add.textContent = "Ajouter";
         add.addEventListener("click", function () {
-          api("/JellyTuber/User/Add", { method: "POST", body: JSON.stringify({ userId: userId, userName: userName, channelId: cid, name: name, thumbnail: thumb }) })
+          api("/JellyTuber/User/Add", { method: "POST", body: JSON.stringify({ channelId: cid, name: name, thumbnail: thumb }) })
             .then(function () { row.remove(); loadMine(); });
         });
         row.appendChild(add);
@@ -475,7 +475,7 @@ internal static class PageHtml
   }
 
   function loadVideos() {
-    api("/JellyTuber/User/Videos?userId=" + encodeURIComponent(userId)).then(function (list) {
+    api("/JellyTuber/User/Videos").then(function (list) {
       var box = document.getElementById("videos"); box.innerHTML = "";
       var n = list.length;
       document.getElementById("vcount").textContent = n + (n > 1 ? " vidéos" : " vidéo");
@@ -490,7 +490,7 @@ internal static class PageHtml
 
         var rm = document.createElement("button"); rm.className = "remove"; rm.textContent = "Retirer";
         rm.addEventListener("click", function () {
-          api("/JellyTuber/User/RemoveVideo", { method: "POST", body: JSON.stringify({ userId: userId, videoId: vid }) }).then(loadVideos);
+          api("/JellyTuber/User/RemoveVideo", { method: "POST", body: JSON.stringify({ videoId: vid }) }).then(loadVideos);
         });
         card.appendChild(rm);
         box.appendChild(card);
@@ -521,7 +521,7 @@ internal static class PageHtml
     var msg = document.getElementById("vmsg");
     if (!url) return;
     msg.style.color = "var(--text-dim)"; msg.textContent = "Ajout…";
-    api("/JellyTuber/User/AddVideo", { method: "POST", body: JSON.stringify({ userId: userId, userName: userName, url: url }) })
+    api("/JellyTuber/User/AddVideo", { method: "POST", body: JSON.stringify({ url: url }) })
       .then(function (r) {
         var status = r && field(r, "Status");
         if (status === "exists") {

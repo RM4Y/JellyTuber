@@ -61,10 +61,17 @@ public class ShortsDetector
             return http.Value;
         }
 
-        // 2) Fallback: yt-dlp vertical-aspect probe.
+        // 2) Fallback: yt-dlp vertical-aspect probe. A failed/timed-out probe
+        // keeps the video but isn't cached, so the next sync asks again
+        // instead of treating a real Short as a regular video until restart.
         var result = await ProbeAsync(videoId, ct).ConfigureAwait(false);
-        Cache[videoId] = result;
-        return result;
+        if (result is null)
+        {
+            return false;
+        }
+
+        Cache[videoId] = result.Value;
+        return result.Value;
     }
 
     /// <summary>
@@ -127,25 +134,14 @@ public class ShortsDetector
             return ids;
         }
 
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
-        var token = timeoutCts.Token;
-
-        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, token).ConfigureAwait(false);
+        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
         if (ytDlpPath is null)
         {
             _logger.LogWarning("yt-dlp is not available (download failed); skipping channel Shorts listing for {ChannelId}.", channelId);
             return ids;
         }
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = ytDlpPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+        var psi = new ProcessStartInfo { FileName = ytDlpPath };
         psi.ArgumentList.Add("--flat-playlist");
         psi.ArgumentList.Add("--no-warnings");
         psi.ArgumentList.Add("--playlist-end");
@@ -155,27 +151,16 @@ public class ShortsDetector
         using var cookieFile = CookieFile.Apply(psi, Plugin.Instance?.Configuration.YouTubeCookies, _logger);
         psi.ArgumentList.Add($"https://www.youtube.com/channel/{channelId}/shorts");
 
-        Process? process = null;
         try
         {
-            process = new Process { StartInfo = psi };
-            process.Start();
-
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(token);
-
-            try
-            {
-                await process.WaitForExitAsync(token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
+            var result = await ProcessRunner.RunAsync(psi, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+            if (result is null)
             {
                 _logger.LogWarning("Channel Shorts listing timed out for {ChannelId}.", channelId);
-                TryKill(process);
                 return ids;
             }
 
-            var stdout = await stdoutTask.ConfigureAwait(false);
-            foreach (var line in stdout.Split('\n'))
+            foreach (var line in result.Stdout.Split('\n'))
             {
                 var id = line.Trim();
                 if (id.Length == 11)
@@ -184,41 +169,25 @@ public class ShortsDetector
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogDebug(ex, "Channel Shorts listing failed for {ChannelId}.", channelId);
-            TryKill(process);
-        }
-        finally
-        {
-            process?.Dispose();
         }
 
         return ids;
     }
 
-    private async Task<bool> ProbeAsync(string videoId, CancellationToken ct)
+    /// <summary>True/false from the video's aspect ratio, or null if yt-dlp failed or timed out (inconclusive).</summary>
+    private async Task<bool?> ProbeAsync(string videoId, CancellationToken ct)
     {
-        // Hard timeout so a slow/stuck yt-dlp call can never freeze the sync.
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
-        var token = timeoutCts.Token;
-
-        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, token).ConfigureAwait(false);
+        var ytDlpPath = await ExternalTools.EnsureYtDlpAsync(_httpClientFactory, _logger, ct).ConfigureAwait(false);
         if (ytDlpPath is null)
         {
             _logger.LogWarning("yt-dlp is not available (download failed); keeping {VideoId}.", videoId);
-            return false;
+            return null;
         }
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = ytDlpPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+        var psi = new ProcessStartInfo { FileName = ytDlpPath };
         psi.ArgumentList.Add("--no-warnings");
         psi.ArgumentList.Add("--skip-download");
         psi.ArgumentList.Add("--print");
@@ -226,74 +195,39 @@ public class ShortsDetector
         using var cookieFile = CookieFile.Apply(psi, Plugin.Instance?.Configuration.YouTubeCookies, _logger);
         psi.ArgumentList.Add($"https://www.youtube.com/watch?v={videoId}");
 
-        Process? process = null;
         try
         {
-            process = new Process { StartInfo = psi };
-            process.Start();
-
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(token);
-
-            try
-            {
-                await process.WaitForExitAsync(token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
+            // Hard timeout so a slow/stuck yt-dlp call can never freeze the sync.
+            var result = await ProcessRunner.RunAsync(psi, TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
+            if (result is null)
             {
                 _logger.LogWarning("Shorts probe timed out for {VideoId}; keeping it.", videoId);
-                TryKill(process);
-                return false;
+                return null;
             }
 
-            var stdout = (await stdoutTask.ConfigureAwait(false)).Trim();
-
-            if (process.ExitCode != 0 || string.IsNullOrEmpty(stdout))
+            var stdout = result.Stdout.Trim();
+            if (result.ExitCode != 0 || string.IsNullOrEmpty(stdout))
             {
-                return false;
+                return null;
             }
 
             // Output: "<width> <height>" (first line).
-            var firstLine = stdout.Split('\n')[0].Trim();
-            var parts = firstLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2)
-            {
-                return false;
-            }
-
-            if (int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var w) &&
-                int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var h) &&
-                w > 0 && h > 0)
+            var parts = stdout.Split('\n')[0].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2
+                && int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var w)
+                && int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var h)
+                && w > 0 && h > 0)
             {
                 // Vertical aspect => Short.
                 return h > w;
             }
 
-            return false;
+            return null;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogDebug(ex, "Shorts probe failed for {VideoId}; keeping it.", videoId);
-            TryKill(process);
-            return false;
-        }
-        finally
-        {
-            process?.Dispose();
-        }
-    }
-
-    private static void TryKill(Process? process)
-    {
-        try
-        {
-            if (process is not null && !process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-            // best effort
+            return null;
         }
     }
 }

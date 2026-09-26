@@ -18,7 +18,7 @@ PROJECT="Jellyfin.Plugin.JellyTuber.csproj"
 DESC="Index YouTube channels and playlists via the YouTube Data API, stream on demand with yt-dlp."
 
 VERSION="${1:-$(jq -r .version meta.json)}"
-REPO="${REPO:-YOUR_GH_USER/jellyfin-jellytuber}"
+REPO="${REPO:-RM4Y/JellyTuber}"
 TAG="${TAG:-v${VERSION}}"
 
 echo ">> Building $NAME $VERSION"

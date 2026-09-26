@@ -136,7 +136,7 @@ internal static class FfmpegMuxer
     /// independently decodable by construction, at the cost of an actual
     /// encode pass instead of a copy.
     /// </summary>
-    public static Process StartContinuousSegmenter(string ffmpegPath, string videoUrl, string audioUrl, double startSeconds, int startSegmentNumber, int segmentCount, int segmentSeconds, string outputDir, string videoEncoder, int outputHeight, bool scaleToOutputHeight, bool isSameNetwork)
+    public static Process StartContinuousSegmenter(string ffmpegPath, string videoUrl, string audioUrl, double startSeconds, int startSegmentNumber, int segmentCount, int segmentSeconds, string outputDir, string videoEncoder, int outputHeight, bool scaleToOutputHeight)
     {
         var psi = new ProcessStartInfo
         {
@@ -227,7 +227,7 @@ internal static class FfmpegMuxer
             // saturate (up to 28Mbps for >1440p), so this costs quality only
             // on genuinely extreme source bitrates, not ordinary 1080p/4K
             // content.
-            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork: true);
             psi.ArgumentList.Add("-maxrate");
             psi.ArgumentList.Add(bitrateBps.ToString(CultureInfo.InvariantCulture));
             psi.ArgumentList.Add("-bufsize");
@@ -241,7 +241,7 @@ internal static class FfmpegMuxer
             // slower preset would buy nothing but stalls. Same capped-
             // quality recipe as libx264: constant quality, bounded by the
             // ladder's ceiling.
-            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork: true);
             psi.ArgumentList.Add("-preset");
             psi.ArgumentList.Add("p4");
             psi.ArgumentList.Add("-tune");
@@ -271,7 +271,7 @@ internal static class FfmpegMuxer
         {
             // Same capped VBR ceiling as the others. h264_vaapi already
             // turns every -force_key_frames frame into an IDR.
-            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork: true);
             psi.ArgumentList.Add("-rc_mode");
             psi.ArgumentList.Add("VBR");
             psi.ArgumentList.Add("-b:v");
@@ -286,7 +286,7 @@ internal static class FfmpegMuxer
             // Speed-oriented preset like libx264's veryfast, capped VBR, and
             // the forced keyframes made real IDRs so every segment is
             // independently decodable.
-            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork: true);
             psi.ArgumentList.Add("-preset");
             psi.ArgumentList.Add("veryfast");
             psi.ArgumentList.Add("-look_ahead");
@@ -311,7 +311,7 @@ internal static class FfmpegMuxer
             // higher ceiling instead, which is still a real cap (openh264's
             // VBV-style enforcement is considerably softer than x264's -
             // treat this as best-effort either way).
-            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork);
+            var bitrateBps = PickVideoBitrateBps(outputHeight, isSameNetwork: true);
             psi.ArgumentList.Add("-rc_mode");
             psi.ArgumentList.Add("bitrate");
             psi.ArgumentList.Add("-allow_skip_frames");
@@ -365,20 +365,16 @@ internal static class FfmpegMuxer
     }
 
     /// <summary>
-    /// A H.264 bitrate ceiling per source height. Two ladders:
-    /// <paramref name="isSameNetwork"/> false (remote/proxied playback) uses
-    /// a conservative ceiling, in the same range common streaming ladders
-    /// use (YouTube/Netflix-style), so the encode fits through a typical
-    /// home upload link instead of an unbounded encode matching (or
-    /// exceeding) the source's own bitrate - that link is usually the
-    /// tightest one in the path for a remote client. <paramref name="isSameNetwork"/>
-    /// true (LAN playback) uses a much higher ceiling instead, since a local
-    /// client shares the LAN's bandwidth rather than the server's own
-    /// uplink - there's no equivalent bottleneck to protect there, and the
-    /// old conservative ceiling was needlessly capping local quality below
-    /// what the source (and the network) could actually support. Only
-    /// actually load-bearing for libopenh264 - libx264 skips the cap
-    /// entirely for the same-network case (see call site).
+    /// A H.264 bitrate ceiling per output height. Two ladders:
+    /// <paramref name="isSameNetwork"/> true is the generous one every HLS
+    /// encode actually uses (the segment cache is shared by LAN and remote
+    /// viewers, see <see cref="VideoCache"/>) - applied as the VBV
+    /// maxrate/bufsize cap on top of each encoder's constant-quality mode.
+    /// <paramref name="isSameNetwork"/> false is a conservative,
+    /// streaming-service-style ladder, now only used for the bitrate
+    /// <see cref="JellyTuberMediaSourceProvider"/> declares to Jellyfin up
+    /// front - under-promising there is harmless, over-promising can skew a
+    /// client's own bandwidth-based quality choice.
     /// </summary>
     public static int PickVideoBitrateBps(int height, bool isSameNetwork)
     {
