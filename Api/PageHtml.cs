@@ -254,16 +254,17 @@ internal static class PageHtml
       </div>
 
       <div class="panel" style="margin-bottom:26px;">
-        <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:16px;">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
           <h2 style="margin:0; font-size:16px; font-weight:600;">Partage depuis l'iPhone</h2>
         </div>
-        <p style="margin:0 0 12px; font-size:13px; color:var(--text-dim);">Dans le raccourci, action « Texte » : coller le lien ci-dessous suivi de l'<b>Entrée du raccourci</b>, puis « Ouvrir les URL ». Il contient votre code secret personnel : ne le partagez pas.</p>
-        <div class="searchRow" style="display:flex; gap:10px;">
-          <input id="shareLink" class="field" style="flex:1; font-size:12.5px;" readonly value="Chargement…" />
-          <button id="copyShareBtn" class="btn-accent" style="flex-shrink:0; padding:13px 18px; font-size:14px;">Copier</button>
+        <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+          <button id="copyShareBtn" class="btn-accent" disabled style="display:flex; align-items:center; gap:9px; padding:13px 22px; font-size:14px; max-width:100%;">
+            <svg style="flex:none;" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span id="shareLinkText" style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Chargement…</span>
+          </button>
+          <button id="regenShareBtn" class="btn-ghost" style="padding:8px 14px; font-size:12.5px;">Générer un nouveau code</button>
         </div>
-        <button id="regenShareBtn" class="btn-ghost" style="margin-top:10px; padding:8px 14px; font-size:12.5px;">Générer un nouveau code</button>
       </div>
 
       <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:13px;">
@@ -531,9 +532,11 @@ internal static class PageHtml
     });
   }
 
+  var shareLink = "";
   function setShareCode(r) {
-    document.getElementById("shareLink").value =
-      location.origin + "/JellyTuber/Share?code=" + encodeURIComponent(field(r, "Code")) + "&url=";
+    shareLink = location.origin + "/JellyTuber/Share?code=" + encodeURIComponent(field(r, "Code")) + "&url=";
+    document.getElementById("shareLinkText").textContent = shareLink;
+    document.getElementById("copyShareBtn").disabled = false;
   }
   function loadShareCode() { api("/JellyTuber/User/ShareCode").then(setShareCode); }
   function regenShareCode() {
@@ -543,10 +546,15 @@ internal static class PageHtml
     });
   }
   function copyShareLink() {
-    var el = document.getElementById("shareLink");
-    (navigator.clipboard ? navigator.clipboard.writeText(el.value) : Promise.reject())
-      .catch(function () { el.select(); document.execCommand("copy"); })
-      .then(function () { toast("Copié."); });
+    if (!shareLink) return;
+    (navigator.clipboard ? navigator.clipboard.writeText(shareLink) : Promise.reject())
+      .catch(function () {
+        // No async clipboard (plain http, old iOS): copy from a throwaway field.
+        var ta = document.createElement("textarea");
+        ta.value = shareLink; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed; opacity:0;";
+        document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+      })
+      .then(function () { toast("Lien copié."); });
   }
 
   function addVideo(onAdded) {
