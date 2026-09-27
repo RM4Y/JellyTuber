@@ -642,9 +642,10 @@ self.addEventListener("fetch", function (e) {
         ContentType = "text/html; charset=utf-8",
         Content = $$"""
 <!DOCTYPE html>
-<html lang="fr"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<html lang="fr"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <title>JellyTuber</title>
 <style>
+  html { touch-action:pan-x pan-y; -webkit-text-size-adjust:100%; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; box-sizing:border-box;
          background:#0c1116; color:#e9eff2; font-family:-apple-system, system-ui, sans-serif; }
   .card { max-width:420px; width:100%; background:#141b22; border:1px solid #243039; border-radius:20px; padding:28px; text-align:center; }
