@@ -29,6 +29,11 @@ public class UserController : ControllerBase
 {
     private static readonly ConcurrentDictionary<string, (DateTime When, List<ChannelResult> Results)> SearchCache = new();
 
+    private static readonly ConcurrentDictionary<string, (DateTime When, List<VideoResult> Results)> VideoSearchCache = new();
+
+    /// <summary>How many videos a name search shows.</summary>
+    private const int VideoSearchResults = 20;
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ITaskManager _taskManager;
     private readonly IUserManager _userManager;
@@ -206,6 +211,122 @@ self.addEventListener("fetch", function (e) {
             _logger.LogError(ex, "Channel search failed for query '{Query}'", q);
             return StatusCode(500, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Search videos by name for the "Vidéo" tab: the <see cref="VideoSearchResults"/>
+    /// most relevant, without Shorts (the page's rule everywhere) or
+    /// lives/premieres (nothing to play yet). Asks YouTube for 50 so there
+    /// are still enough once those are dropped; cached 30 min per query
+    /// since each search costs ~101 of the 10,000 daily quota units.
+    /// </summary>
+    [HttpPost("JellyTuber/User/SearchVideos")]
+    [Authorize]
+    public async Task<ActionResult> SearchVideos([FromBody] SearchRequest req)
+    {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
+        var cfg = Plugin.Instance!.Configuration;
+        if (string.IsNullOrWhiteSpace(cfg.ApiKey))
+        {
+            return BadRequest("The administrator has not set a YouTube API key.");
+        }
+
+        var q = (req.Query ?? string.Empty).Trim();
+        if (q.Length < 2)
+        {
+            return new JsonResult(new List<VideoResult>());
+        }
+
+        List<VideoResult> results;
+        var key = q.ToLowerInvariant();
+        if (VideoSearchCache.TryGetValue(key, out var cached) && (DateTime.UtcNow - cached.When).TotalMinutes < 30)
+        {
+            results = cached.Results;
+        }
+        else
+        {
+            try
+            {
+                results = await SearchVideosCoreAsync(cfg, q, HttpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Video search failed for query '{Query}'", q);
+                return StatusCode(500, ex.Message);
+            }
+
+            VideoSearchCache[key] = (DateTime.UtcNow, results);
+            if (VideoSearchCache.Count > 200)
+            {
+                foreach (var kvp in VideoSearchCache)
+                {
+                    if ((DateTime.UtcNow - kvp.Value.When).TotalMinutes >= 30)
+                    {
+                        VideoSearchCache.TryRemove(kvp.Key, out _);
+                    }
+                }
+            }
+        }
+
+        HashSet<string> mine;
+        lock (Plugin.ConfigLock)
+        {
+            mine = cfg.UserVideos.Where(v => IsUser(v.UserId, userId)).Select(v => v.VideoId).ToHashSet(StringComparer.Ordinal);
+        }
+
+        return new JsonResult(results.Select(r => new
+        {
+            r.VideoId,
+            r.Title,
+            r.ChannelTitle,
+            r.Thumbnail,
+            r.DurationSeconds,
+            r.PublishedAt,
+            AlreadyAdded = mine.Contains(r.VideoId)
+        }));
+    }
+
+    private async Task<List<VideoResult>> SearchVideosCoreAsync(PluginConfiguration cfg, string query, CancellationToken ct)
+    {
+        var api = new YouTubeApiClient(_httpClientFactory.CreateClient(), cfg.ApiKey, _logger);
+        var hits = (await api.SearchVideosAsync(query, 50, ct).ConfigureAwait(false))
+            .Where(v => string.Equals(v.LiveBroadcastContent, "none", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        // Same rule as the channel sync: anything up to the probe threshold
+        // might be a Short, so check those (cheap HTTP probe, cached).
+        var threshold = cfg.ShortsMaxProbeSeconds > 0 ? cfg.ShortsMaxProbeSeconds : 180;
+        var detector = new ShortsDetector(_httpClientFactory, _logger);
+        var shortIds = new ConcurrentDictionary<string, bool>();
+        await Parallel.ForEachAsync(
+            hits.Where(v => v.DurationSeconds() is not { } d || d <= threshold),
+            new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+            async (v, token) =>
+            {
+                if (await detector.IsShortAsync(v.VideoId, token).ConfigureAwait(false))
+                {
+                    shortIds[v.VideoId] = true;
+                }
+            }).ConfigureAwait(false);
+
+        return hits
+            .Where(v => !shortIds.ContainsKey(v.VideoId))
+            .Take(VideoSearchResults)
+            .Select(v => new VideoResult
+            {
+                VideoId = v.VideoId,
+                Title = v.Title,
+                ChannelTitle = v.ChannelTitle,
+                Thumbnail = v.ThumbnailUrl,
+                DurationSeconds = v.DurationSeconds(),
+                PublishedAt = v.PublishedAt
+            })
+            .ToList();
     }
 
     [HttpGet("JellyTuber/User/Channels")]
@@ -690,6 +811,16 @@ self.addEventListener("fetch", function (e) {
         public string ChannelId { get; set; } = string.Empty;
         public string Name { get; set; } = string.Empty;
         public string Thumbnail { get; set; } = string.Empty;
+    }
+
+    public class VideoResult
+    {
+        public string VideoId { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public string ChannelTitle { get; set; } = string.Empty;
+        public string Thumbnail { get; set; } = string.Empty;
+        public int? DurationSeconds { get; set; }
+        public DateTime PublishedAt { get; set; }
     }
 
     public class AddRequest

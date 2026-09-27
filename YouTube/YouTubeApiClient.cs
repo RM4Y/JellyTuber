@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.RegularExpressions;
@@ -63,6 +64,48 @@ public class YouTubeApiClient
             {
                 results.Add((channelId, title, item.Snippet?.Thumbnails?.Best() ?? string.Empty));
             }
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Search videos by title/keywords (limit 1..50), most relevant first,
+    /// with durations filled in so the caller can weed out Shorts. Costs
+    /// 100 quota units (search.list) + 1 (videos.list), so the caller caches.
+    /// search.list returns titles HTML-escaped ("&amp;#39;"), hence the decode.
+    /// </summary>
+    public async Task<List<YouTubeVideo>> SearchVideosAsync(string query, int maxResults, CancellationToken ct)
+    {
+        var limit = Math.Clamp(maxResults, 1, 50);
+        var url = $"{ApiBase}/search?part=snippet&type=video&relevanceLanguage=fr&maxResults={limit.ToString(System.Globalization.CultureInfo.InvariantCulture)}" +
+                  $"&q={Uri.EscapeDataString(query)}&key={_apiKey}";
+
+        var resp = await _http.GetFromJsonAsync<SearchResponse>(url, ct).ConfigureAwait(false);
+        var results = new List<YouTubeVideo>();
+        foreach (var item in resp?.Items ?? new List<SearchItem>())
+        {
+            var videoId = item.Id?.VideoId;
+            if (string.IsNullOrEmpty(videoId))
+            {
+                continue;
+            }
+
+            results.Add(new YouTubeVideo
+            {
+                VideoId = videoId,
+                Title = WebUtility.HtmlDecode(item.Snippet?.Title ?? videoId),
+                Description = WebUtility.HtmlDecode(item.Snippet?.Description ?? string.Empty),
+                PublishedAt = (item.Snippet?.PublishedAt ?? DateTime.MinValue).ToUniversalTime(),
+                ThumbnailUrl = item.Snippet?.Thumbnails?.Best() ?? string.Empty,
+                ChannelTitle = WebUtility.HtmlDecode(item.Snippet?.ChannelTitle ?? string.Empty),
+                LiveBroadcastContent = item.Snippet?.LiveBroadcastContent ?? "none"
+            });
+        }
+
+        if (results.Count > 0)
+        {
+            await EnrichWithDetailsAsync(results, ct).ConfigureAwait(false);
         }
 
         return results;

@@ -16,6 +16,12 @@ public class YouTubeVideo
     /// <summary>ISO-8601 duration string (e.g. "PT12M3S"), when details are fetched.</summary>
     public string? Duration { get; set; }
 
+    /// <summary>Uploading channel's name (filled by <see cref="YouTubeApiClient.SearchVideosAsync"/>).</summary>
+    public string ChannelTitle { get; set; } = string.Empty;
+
+    /// <summary>"none" for a regular upload, "live"/"upcoming" for streams and premieres.</summary>
+    public string LiveBroadcastContent { get; set; } = "none";
+
     /// <summary>
     /// Parsed duration in seconds, or null if unknown. Used to detect Shorts.
     /// </summary>
@@ -222,6 +228,9 @@ internal class SearchItemId
 {
     [JsonPropertyName("channelId")]
     public string? ChannelId { get; set; }
+
+    [JsonPropertyName("videoId")]
+    public string? VideoId { get; set; }
 }
 
 internal class SearchItemSnippet
@@ -231,6 +240,18 @@ internal class SearchItemSnippet
 
     [JsonPropertyName("channelId")]
     public string? ChannelId { get; set; }
+
+    [JsonPropertyName("channelTitle")]
+    public string? ChannelTitle { get; set; }
+
+    [JsonPropertyName("description")]
+    public string? Description { get; set; }
+
+    [JsonPropertyName("publishedAt")]
+    public DateTime? PublishedAt { get; set; }
+
+    [JsonPropertyName("liveBroadcastContent")]
+    public string? LiveBroadcastContent { get; set; }
 
     [JsonPropertyName("thumbnails")]
     public ThumbnailSet? Thumbnails { get; set; }

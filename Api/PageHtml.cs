@@ -102,6 +102,11 @@ internal static class PageHtml
   .maxvid button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
   .maxvid button:disabled { opacity:.35; cursor:default; }
   .maxvid b { font-size:13px; font-weight:700; color:var(--accent); min-width:1.6em; text-align:center; }
+  .vthumb { width:96px; height:54px; border-radius:8px; object-fit:cover; flex:none; background:var(--bg-elev);
+    border:1px solid var(--border); display:block; }
+  .vtitle { font-size:14px; font-weight:600; color:var(--text); line-height:1.3;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .vmeta { font-size:12.5px; color:var(--text-dim); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .remove { padding:8px 14px; border-radius:10px; border:1px solid var(--border); background:transparent;
     color:var(--text-dim); font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; flex:none; }
   .remove:hover { border-color:#e0738a; color:#e0738a; }
@@ -241,10 +246,11 @@ internal static class PageHtml
           <h2 style="margin:0; font-size:16px; font-weight:600;">Ajouter une vidéo</h2>
         </div>
         <div class="searchRow" style="display:flex; gap:10px;">
-          <input id="vq" class="field" style="flex:1;" placeholder="Collez un lien de vidéo YouTube…" />
+          <input id="vq" class="field" style="flex:1;" placeholder="Collez un lien ou tapez le nom d'une vidéo…" />
           <button id="addVideoBtn" class="btn-accent" style="flex-shrink:0; padding:13px 22px; font-size:14px;">Ajouter</button>
         </div>
         <p id="vmsg" style="margin:11px 0 0; font-size:13px; color:var(--text-dim); min-height:1px;"></p>
+        <div id="vresults" style="display:flex; flex-direction:column; gap:8px; margin-top:8px; max-height:520px; overflow-y:auto;"></div>
       </div>
 
       <div class="panel" style="margin-bottom:26px;">
@@ -569,6 +575,63 @@ internal static class PageHtml
       });
   }
 
+  // One box for both: a YouTube link is added straight away, anything else
+  // is searched by name.
+  function isVideoLink(t) { return /^https?:\/\//i.test(t) || /(youtube\.com|youtu\.be)\//i.test(t); }
+  function updateVideoBtn() {
+    var t = document.getElementById("vq").value.trim();
+    document.getElementById("addVideoBtn").textContent = !t || isVideoLink(t) ? "Ajouter" : "Rechercher";
+  }
+  function submitVideo() {
+    var t = document.getElementById("vq").value.trim();
+    if (!t) return;
+    if (isVideoLink(t)) { document.getElementById("vresults").innerHTML = ""; addVideo(); } else { searchVideos(t); }
+  }
+  function fmtDuration(sec) {
+    if (sec == null) return "";
+    var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+  }
+  function searchVideos(q) {
+    var box = document.getElementById("vresults"), msg = document.getElementById("vmsg");
+    msg.textContent = ""; box.innerHTML = '<p style="color:var(--text-dim); font-size:14px; margin:4px 0 0;">Recherche…</p>';
+    api("/JellyTuber/User/SearchVideos", { method: "POST", body: JSON.stringify({ query: q }) }).then(function (list) {
+      box.innerHTML = "";
+      if (!list.length) { box.innerHTML = '<p style="color:var(--text-dim); font-size:14px; margin:4px 0 0;">Aucune vidéo trouvée.</p>'; return; }
+      list.forEach(function (v) {
+        var vid = field(v, "VideoId"), title = field(v, "Title");
+        var row = document.createElement("div");
+        row.className = "rowline"; row.style.cssText = "padding:10px 12px; border-radius:13px; background:var(--bg-elev2); flex-wrap:nowrap;";
+        var im = document.createElement("img");
+        im.className = "vthumb"; im.src = field(v, "Thumbnail") || ""; im.alt = ""; im.loading = "lazy"; im.referrerPolicy = "no-referrer";
+        row.appendChild(im);
+        var txt = document.createElement("div"); txt.style.cssText = "flex:1; min-width:0;";
+        var t = document.createElement("div"); t.className = "vtitle"; t.textContent = title;
+        var meta = document.createElement("div"); meta.className = "vmeta";
+        meta.textContent = [field(v, "ChannelTitle"), fmtDuration(field(v, "DurationSeconds"))].filter(Boolean).join(" · ");
+        txt.appendChild(t); txt.appendChild(meta); row.appendChild(txt);
+        var add = document.createElement("button"); add.className = "btn-accent"; add.style.cssText = "padding:8px 14px; font-size:13px; flex:none;";
+        function done(label) { add.textContent = label; add.disabled = true; add.style.opacity = ".55"; add.style.cursor = "default"; }
+        if (field(v, "AlreadyAdded")) { done("Déjà ajoutée"); } else { add.textContent = "Ajouter"; }
+        add.addEventListener("click", function () {
+          if (add.disabled) return;
+          add.disabled = true; add.textContent = "Ajout…";
+          api("/JellyTuber/User/AddVideo", { method: "POST", body: JSON.stringify({ url: "https://www.youtube.com/watch?v=" + vid }) })
+            .then(function (r) {
+              var status = r && field(r, "Status");
+              if (status === "short") { done("Short"); toast("C'est un Short — non ajouté."); }
+              else if (status === "exists") { done("Déjà ajoutée"); }
+              else { done("Ajoutée ✓"); toast("Vidéo ajoutée."); }
+              loadVideos();
+            })
+            .catch(function () { add.disabled = false; add.textContent = "Ajouter"; toast("Échec de l'ajout."); });
+        });
+        row.appendChild(add);
+        box.appendChild(row);
+      });
+    }).catch(function (e) { box.innerHTML = '<p style="color:var(--text-dim); font-size:14px; margin:4px 0 0;">Recherche échouée (' + (e && e.message) + ').</p>'; });
+  }
+
   function toast(msg) {
     var t = document.createElement("div"); t.className = "toast"; t.textContent = msg;
     document.body.appendChild(t); setTimeout(function () { t.remove(); }, 3500);
@@ -591,10 +654,11 @@ internal static class PageHtml
   document.getElementById("searchBtn").addEventListener("click", search);
   document.getElementById("tabBtnChaine").addEventListener("click", function () { switchTab("chaine"); });
   document.getElementById("tabBtnVideo").addEventListener("click", function () { switchTab("video"); });
-  document.getElementById("addVideoBtn").addEventListener("click", function () { addVideo(); });
+  document.getElementById("addVideoBtn").addEventListener("click", submitVideo);
+  document.getElementById("vq").addEventListener("input", updateVideoBtn);
   document.getElementById("copyShareBtn").addEventListener("click", copyShareLink);
   document.getElementById("regenShareBtn").addEventListener("click", regenShareCode);
-  document.getElementById("vq").addEventListener("keydown", function (e) { if (e.key === "Enter") addVideo(); });
+  document.getElementById("vq").addEventListener("keydown", function (e) { if (e.key === "Enter") submitVideo(); });
   document.getElementById("themeBtn").addEventListener("click", function () {
     applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
   });
