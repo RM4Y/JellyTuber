@@ -54,6 +54,9 @@ public class YouTubeSyncTask : IScheduledTask
 
     public string Name => "Sync YouTube (Fast)";
     public string Key => "JellyTuberSync";
+
+    /// <summary>Channel-level folder holding a user's individually-added videos.</summary>
+    internal const string VideosFolderName = "Mes Videos";
     public string Description => "Index configured YouTube channels/playlists via the Data API.";
     public string Category => "JellyTuber";
 
@@ -491,7 +494,6 @@ public class YouTubeSyncTask : IScheduledTask
         SemaphoreSlim precacheGate,
         CancellationToken ct)
     {
-        const string VideosFolderName = "Mes Videos";
         var roots = new List<string>();
         var configDirty = false;
         var written = 0;

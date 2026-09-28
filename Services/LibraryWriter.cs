@@ -25,6 +25,8 @@ namespace Jellyfin.Plugin.JellyTuber.Services;
 ///           {Video Title}.strm
 ///           {Video Title}.nfo
 ///           {Video Title}.jpg
+///           fanart.jpg        (same thumbnail as backdrop,
+///           landscape.jpg      and as landscape thumb)
 ///           .ytmeta           (dedup / age-cleanup marker)
 ///
 /// There is no "Season YYYY" level: every video folder lives directly under
@@ -288,6 +290,7 @@ public class LibraryWriter
                 await DownloadAsync(video.ThumbnailUrl, Path.Combine(videoDir, safeTitle + ".jpg"), ct).ConfigureAwait(false);
             }
 
+            CopyLandscapeImages(videoDir, safeTitle);
             return false;
         }
 
@@ -306,6 +309,8 @@ public class LibraryWriter
         {
             await DownloadAsync(video.ThumbnailUrl, Path.Combine(videoDir, safeTitle + ".jpg"), ct).ConfigureAwait(false);
         }
+
+        CopyLandscapeImages(videoDir, safeTitle);
 
         return true;
     }
@@ -690,6 +695,40 @@ public class LibraryWriter
         sb.AppendLine($"  <premiered>{v.PublishedAt:yyyy-MM-dd}</premiered>");
         sb.AppendLine("</movie>");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// The YouTube thumbnail is 16:9, but as {Title}.jpg Jellyfin only uses it
+    /// as the Primary (poster) image. Clients that draw landscape cards from
+    /// the Backdrop or Thumb image instead (Swiftfin's "Continue watching" /
+    /// "Latest" rows, Android TV) then showed an empty tile, so the same file
+    /// is also saved under the names Jellyfin reads those two from. Fixed
+    /// names, so a title-change rename doesn't need to touch them; only
+    /// written when missing, so existing videos get them on their next sync.
+    /// </summary>
+    private void CopyLandscapeImages(string videoDir, string safeTitle)
+    {
+        var thumb = Path.Combine(videoDir, safeTitle + ".jpg");
+        if (!File.Exists(thumb))
+        {
+            return;
+        }
+
+        foreach (var name in new[] { "fanart.jpg", "landscape.jpg" })
+        {
+            var dest = Path.Combine(videoDir, name);
+            try
+            {
+                if (!File.Exists(dest))
+                {
+                    File.Copy(thumb, dest);
+                }
+            }
+            catch (IOException ex)
+            {
+                _logger.LogDebug(ex, "Could not write {Image}", dest);
+            }
+        }
     }
 
     private async Task DownloadAsync(string url, string destination, CancellationToken ct)

@@ -31,19 +31,23 @@ public class UserController : ControllerBase
 
     private static readonly ConcurrentDictionary<string, (DateTime When, List<VideoResult> Results)> VideoSearchCache = new();
 
+    private static readonly ConcurrentDictionary<string, (DateTime When, List<VideoResult> Results)> ChannelPreviewCache = new();
+
     /// <summary>How many videos a name search shows.</summary>
     private const int VideoSearchResults = 20;
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ITaskManager _taskManager;
     private readonly IUserManager _userManager;
+    private readonly ILibraryManager _libraryManager;
     private readonly ILogger<UserController> _logger;
 
-    public UserController(IHttpClientFactory httpClientFactory, ITaskManager taskManager, IUserManager userManager, ILogger<UserController> logger)
+    public UserController(IHttpClientFactory httpClientFactory, ITaskManager taskManager, IUserManager userManager, ILibraryManager libraryManager, ILogger<UserController> logger)
     {
         _httpClientFactory = httpClientFactory;
         _taskManager = taskManager;
         _userManager = userManager;
+        _libraryManager = libraryManager;
         _logger = logger;
     }
 
@@ -350,6 +354,187 @@ self.addEventListener("fetch", function (e) {
         }
     }
 
+    /// <summary>
+    /// Channel page: a preview of the channel's latest videos straight from
+    /// YouTube - its MaxVideos newest, without Shorts when it excludes them,
+    /// i.e. what the sync keeps - whether or not they're synced yet; each
+    /// flagged with whether it's already in the user's library.
+    /// </summary>
+    [HttpGet("JellyTuber/User/ChannelVideos")]
+    [Authorize]
+    public async Task<ActionResult> ChannelVideos([FromQuery] string? channelId)
+    {
+        var userId = SessionUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
+        var cfg = Plugin.Instance!.Configuration;
+        if (string.IsNullOrWhiteSpace(cfg.ApiKey))
+        {
+            return BadRequest("The administrator has not set a YouTube API key.");
+        }
+
+        UserChannel? uc;
+        lock (Plugin.ConfigLock)
+        {
+            uc = cfg.UserChannels.FirstOrDefault(c => IsUser(c.UserId, userId) && c.ChannelId == channelId);
+        }
+
+        if (uc is null)
+        {
+            return NotFound();
+        }
+
+        var maxVideos = Math.Clamp(uc.MaxVideos, 5, 50);
+        var key = $"{uc.ChannelId}|{maxVideos}|{uc.ExcludeShorts}";
+        List<VideoResult> videos;
+        if (ChannelPreviewCache.TryGetValue(key, out var cached) && (DateTime.UtcNow - cached.When).TotalMinutes < 30)
+        {
+            videos = cached.Results;
+        }
+        else
+        {
+            try
+            {
+                videos = await ChannelPreviewCoreAsync(cfg, uc.Url, maxVideos, uc.ExcludeShorts, HttpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Channel preview failed for {Channel}", uc.Name);
+                return StatusCode(500, ex.Message);
+            }
+
+            ChannelPreviewCache[key] = (DateTime.UtcNow, videos);
+            if (ChannelPreviewCache.Count > 200)
+            {
+                foreach (var kvp in ChannelPreviewCache)
+                {
+                    if ((DateTime.UtcNow - kvp.Value.When).TotalMinutes >= 30)
+                    {
+                        ChannelPreviewCache.TryRemove(kvp.Key, out _);
+                    }
+                }
+            }
+        }
+
+        var synced = SyncedVideoFolders(cfg, uc.UserName, uc.Name);
+
+        return new JsonResult(new
+        {
+            uc.ChannelId,
+            uc.Name,
+            uc.Thumbnail,
+            MaxVideos = maxVideos,
+            uc.ExcludeShorts,
+            Videos = videos.Select(v => new
+            {
+                v.VideoId,
+                v.Title,
+                v.Thumbnail,
+                v.DurationSeconds,
+                v.PublishedAt,
+                InLibrary = synced.ContainsKey(v.VideoId),
+                JellyfinId = synced.TryGetValue(v.VideoId, out var dir) ? JellyfinItemId(dir) : null
+            })
+        });
+    }
+
+    /// <summary>
+    /// videoId -> folder of the videos already synced into one of the user's
+    /// channel folders - the same LibraryFolder/User/Channel path the sync writes.
+    /// </summary>
+    private Dictionary<string, string> SyncedVideoFolders(PluginConfiguration cfg, string userName, string channelName)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.LibraryFolder))
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+
+        var channelRoot = System.IO.Path.Combine(
+            cfg.LibraryFolder, PathSafety.Segment(userName, "user"), PathSafety.Segment(channelName, "channel"));
+        return PathSafety.IsStrictlyInside(channelRoot, cfg.LibraryFolder)
+            ? new LibraryWriter(_httpClientFactory.CreateClient(), _logger).BuildVideoIndex(channelRoot)
+            : new Dictionary<string, string>(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The Jellyfin item for a synced video folder (the episode is its .strm),
+    /// so the page can link straight to it; null until the library scan after
+    /// the sync has picked it up.
+    /// </summary>
+    private string? JellyfinItemId(string videoDir)
+    {
+        try
+        {
+            var strm = System.IO.Directory.EnumerateFiles(videoDir, "*.strm").FirstOrDefault();
+            return strm is null ? null : _libraryManager.FindByPath(strm, false)?.Id.ToString("N");
+        }
+        catch (System.IO.IOException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<List<VideoResult>> ChannelPreviewCoreAsync(
+        PluginConfiguration cfg, string channelUrl, int maxVideos, bool excludeShorts, CancellationToken ct)
+    {
+        var api = new YouTubeApiClient(_httpClientFactory.CreateClient(), cfg.ApiKey, _logger);
+        var channel = await api.ResolveChannelAsync(channelUrl, ct).ConfigureAwait(false);
+        if (channel is null || string.IsNullOrEmpty(channel.UploadsPlaylistId))
+        {
+            return new List<VideoResult>();
+        }
+
+        var threshold = cfg.ShortsMaxProbeSeconds > 0 ? cfg.ShortsMaxProbeSeconds : 180;
+        var detector = new ShortsDetector(_httpClientFactory, _logger);
+        var shortIds = new ConcurrentDictionary<string, bool>();
+        List<YouTubeVideo> kept = new();
+
+        // A small window first (enough for most channels); only a channel
+        // heavy on Shorts needs the sync's full buffer of maxVideos * 8.
+        foreach (var fetchLimit in new[] { maxVideos * 2, Math.Min(400, maxVideos * 8) })
+        {
+            var videos = await api.GetPlaylistVideosAsync(channel.UploadsPlaylistId, fetchLimit, ct).ConfigureAwait(false);
+            await api.EnrichWithDetailsAsync(videos, ct).ConfigureAwait(false);
+            if (excludeShorts)
+            {
+                await Parallel.ForEachAsync(
+                    videos.Where(v => !shortIds.ContainsKey(v.VideoId) && (v.DurationSeconds() is not { } d || d <= threshold)),
+                    new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+                    async (v, token) =>
+                    {
+                        if (await detector.IsShortAsync(v.VideoId, token).ConfigureAwait(false))
+                        {
+                            shortIds[v.VideoId] = true;
+                        }
+                    }).ConfigureAwait(false);
+            }
+
+            kept = videos.Where(v => !shortIds.ContainsKey(v.VideoId)).ToList();
+            if (kept.Count >= maxVideos || videos.Count < fetchLimit)
+            {
+                break;
+            }
+        }
+
+        // Newest by publish date, like the sync's trim.
+        return kept
+            .OrderByDescending(v => v.PublishedAt)
+            .Take(maxVideos)
+            .Select(v => new VideoResult
+            {
+                VideoId = v.VideoId,
+                Title = v.Title,
+                ChannelTitle = channel.Title,
+                Thumbnail = v.ThumbnailUrl,
+                DurationSeconds = v.DurationSeconds(),
+                PublishedAt = v.PublishedAt
+            })
+            .ToList();
+    }
+
     [HttpPost("JellyTuber/User/Add")]
     [Authorize]
     public ActionResult Add([FromBody] AddRequest req)
@@ -493,14 +678,23 @@ self.addEventListener("fetch", function (e) {
         }
 
         var cfg = Plugin.Instance!.Configuration;
+        List<UserVideo> mine;
         lock (Plugin.ConfigLock)
         {
-            var mine = cfg.UserVideos
-                .Where(v => IsUser(v.UserId, userId))
-                .Select(v => new { v.VideoId, v.Title, v.Thumbnail, v.Url })
-                .ToList();
-            return new JsonResult(mine);
+            mine = cfg.UserVideos.Where(v => IsUser(v.UserId, userId)).ToList();
         }
+
+        var synced = mine.Count > 0
+            ? SyncedVideoFolders(cfg, mine[0].UserName, YouTubeSyncTask.VideosFolderName)
+            : new Dictionary<string, string>(StringComparer.Ordinal);
+        return new JsonResult(mine.Select(v => new
+        {
+            v.VideoId,
+            v.Title,
+            v.Thumbnail,
+            v.Url,
+            JellyfinId = synced.TryGetValue(v.VideoId, out var dir) ? JellyfinItemId(dir) : null
+        }));
     }
 
     [HttpPost("JellyTuber/User/AddVideo")]
